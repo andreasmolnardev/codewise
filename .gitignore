@@ -27,6 +27,7 @@ squashfs-root/
 .gstack/
 dist-electron/
 .electron-runtime/
+.codegraph/index.db
 .showcase/
 apps/mobile/.showcase/
 artifacts/app-store/screenshots/
