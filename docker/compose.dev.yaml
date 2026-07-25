@@ -1,0 +1,31 @@
+name: codewise-dev
+
+services:
+  codewise:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.dev
+    ports:
+      - "127.0.0.1:3773:3773"
+      - "127.0.0.1:5173:5173"
+    volumes:
+      - codewise-dev-state:/var/lib/codewise
+      - codewise-dev-workspaces:/workspaces
+      - codewise-dev-codex:/home/codewise/.codex
+      - codewise-dev-opencode:/home/codewise/.config/opencode
+      - codewise-dev-gh:/home/codewise/.config/gh
+      - codewise-dev-ssh:/home/codewise/.ssh
+    healthcheck:
+      test: [CMD-SHELL, "curl -fsS http://127.0.0.1:5173/ | grep -q '<!doctype html>'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+volumes:
+  codewise-dev-state:
+  codewise-dev-workspaces:
+  codewise-dev-codex:
+  codewise-dev-opencode:
+  codewise-dev-gh:
+  codewise-dev-ssh:

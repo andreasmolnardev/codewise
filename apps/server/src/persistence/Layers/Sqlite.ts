@@ -35,6 +35,11 @@ const setup = Layer.effectDiscard(
     const sql = yield* SqlClient.SqlClient;
     yield* sql`PRAGMA journal_mode = WAL;`;
     yield* sql`PRAGMA foreign_keys = ON;`;
+    // Containers can briefly overlap during a restart or volume hand-off.  WAL
+    // still needs a bounded wait for the writer lock; failing immediately is a
+    // common source of avoidable startup and persistence failures.
+    yield* sql`PRAGMA busy_timeout = 5000;`;
+    yield* sql`PRAGMA synchronous = NORMAL;`;
     yield* runMigrations();
   }),
 );

@@ -42,6 +42,18 @@ const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
 const DESKTOP_RENDERER_ORIGINS = ["t3code://app", "t3code-dev://app"];
 
+/**
+ * Unauthenticated, deliberately small readiness endpoint for container
+ * orchestrators. It does not disclose configuration or credentials; the
+ * application routes are only installed once persistence migrations and the
+ * runtime layer have successfully initialized.
+ */
+export const healthRouteLayer = HttpRouter.add(
+  "GET",
+  "/healthz",
+  Effect.succeed(HttpServerResponse.json({ status: "ok" })),
+);
+
 export const browserApiCorsLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;

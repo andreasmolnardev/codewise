@@ -1,0 +1,14 @@
+.git
+.repos
+.pnpm-store
+node_modules
+**/node_modules
+**/dist
+**/.vite-plus
+.env
+.env.*
+docker/secrets
+*.sqlite
+*.sqlite-*
+coverage
+test-results

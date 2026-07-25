@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24.13.1-bookworm-slim
+
+WORKDIR /src
+RUN corepack enable
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tini util-linux python3 make g++ \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 1000 codewise || true \
+ && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash codewise || true \
+ && npm install --global --omit=dev "@openai/codex@0.98.0" "opencode-ai@1.3.15" \
+ && corepack enable
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.base.json ./
+COPY patches ./patches
+COPY apps ./apps
+COPY packages ./packages
+COPY scripts ./scripts
+COPY oxlint-plugin-t3code ./oxlint-plugin-t3code
+RUN pnpm install --frozen-lockfile
+RUN mkdir -p /src/apps/web/node_modules/.vite-temp \
+ && chown 1000:1000 /src/apps/web/node_modules /src/apps/web/node_modules/.vite-temp
+
+COPY docker/dev-entrypoint.sh /usr/local/bin/codewise-dev-entrypoint
+RUN chmod 0755 /usr/local/bin/codewise-dev-entrypoint \
+ && mkdir -p /var/lib/codewise /workspaces /home/codewise/.codex /home/codewise/.config/opencode /home/codewise/.config/gh /home/codewise/.ssh \
+ && chown -R 1000:1000 /var/lib/codewise /workspaces /home/codewise
+
+ENV HOME=/home/codewise \
+    CODEX_HOME=/home/codewise/.codex \
+    XDG_CONFIG_HOME=/home/codewise/.config \
+    T3CODE_CONTAINER=true \
+    T3CODE_HOME=/var/lib/codewise \
+    T3CODE_PORT=3773 \
+    T3CODE_HOST=0.0.0.0 \
+    T3CODE_NO_BROWSER=true \
+    T3CODE_MODE=web \
+    VITE_DEV_SERVER_URL=http://localhost:5173 \
+    VITE_WS_URL=ws://localhost:3773 \
+    HOST=0.0.0.0 \
+    PORT=5173
+
+EXPOSE 3773 5173
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/codewise-dev-entrypoint"]

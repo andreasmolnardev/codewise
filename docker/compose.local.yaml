@@ -1,0 +1,4 @@
+services:
+  tailscale:
+    ports:
+      - "127.0.0.1:3773:3773"
