@@ -17,23 +17,14 @@ Open `http://localhost:3773/` or `http://localhost:5173/`.
 
 The remaining instructions describe the production Compose deployment.
 
-This Compose project runs Codewise only on the tailnet. It intentionally has
-no published production HTTP port: `tailscale` owns the network namespace and
-proxies tailnet HTTPS traffic to Codewise on `127.0.0.1:3773`.
-
 ## First start
 
 1. Copy `docker/.env.example` to `docker/.env` and choose `DEPLOYMENT_NAME`.
-2. Create `docker/secrets/tailscale-authkey` with a tagged, pre-authorized
-   Tailscale auth key. Keep this file out of source control and restrict it to
-   the deployer account (`chmod 600`). It is read only for initial enrollment;
-   `tailscale-state` preserves the device identity after that.
-3. From this directory run `docker compose --env-file .env up -d --build`.
-4. Authenticate Codex, OpenCode, GitHub CLI, and SSH from the `codewise`
+2. From this directory run `docker compose --env-file .env up -d --build`.
+3. Authenticate Codex, OpenCode, GitHub CLI, and SSH from the `codewise`
    container. Their dedicated volumes persist credentials across recreation.
 
-Use `docker compose -f compose.yaml -f compose.local.yaml up -d` only when a
-localhost recovery port is needed. Do not use that override on shared hosts.
+Codewise is published on `http://127.0.0.1:3773/`.
 
 ## Durable paths
 
@@ -83,10 +74,9 @@ separate SQLite-backed authorization domain.
 
 `GET /healthz` is a minimal readiness check and intentionally returns no
 credential or topology information. Check `docker compose ps`, the Codewise
-health check, Tailscale status, and Docker proxy health after an upgrade.
+health check, and Docker proxy health after an upgrade.
 Monitor free space for both `codewise-state` and `codewise-workspaces`; leave
 enough space for a worktree, attachment upload, and SQLite WAL checkpoint.
 
-Deleting `tailscale-state` is an intentional logout/re-enrollment operation
-and creates a new Tailscale device identity. Apply tailnet tags and ACL/grants
-so only intended users and devices can reach the node.
+Limit host/network access to `127.0.0.1:3773` using your standard firewall or
+reverse-proxy controls when exposing Codewise beyond the local machine.
