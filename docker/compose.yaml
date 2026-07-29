@@ -2,6 +2,7 @@ name: codewise
 
 services:
   codewise:
+    image: ${CODEWISE_IMAGE:-ghcr.io/andreasmolnardev/codewise:latest}
     build:
       context: ..
       dockerfile: docker/Dockerfile.prod
