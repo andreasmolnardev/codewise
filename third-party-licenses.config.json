@@ -151,6 +151,80 @@
   ],
   "packageOverrides": [
     {
+      "repositoryUrl": "https://github.com/earendil-works/pi",
+      "sourceUrl": "https://github.com/earendil-works/pi",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2025 Mario Zechner"]
+      }
+    },
+    {
+      "name": "standardwebhooks",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/standard-webhooks/standard-webhooks/tree/main/libraries/javascript",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) Standard Webhooks"]
+      }
+    },
+    {
+      "name": "data-uri-to-buffer",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/TooTallNate/node-data-uri-to-buffer",
+      "generatedNotice": {
+        "licenseId": "MIT",
+        "copyrights": ["Copyright (c) 2014 Nathan Rajlich <nathan@tootallnate.net>"]
+      }
+    },
+    {
+      "name": "@subpolar/acp",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/environments",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/runtime",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/shared",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/runtime-host",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/runtime-pi",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "@subpolar/tools",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
+      "name": "effect-acp",
+      "license": "MIT",
+      "sourceUrl": "https://github.com/andreasmolnardev/codewise",
+      "noticeFile": "LICENSE"
+    },
+    {
       "name": "@bufbuild/protobuf",
       "version": "1.10.0",
       "generatedNotices": [
