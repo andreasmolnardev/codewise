@@ -8,22 +8,36 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
+<<<<<<<< HEAD:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Website/tanstack-dev-bindings-fixture/src/routeTree.gen.ts
 import { Route as rootRouteImport } from "./routes/__root";
 import { Route as IndexRouteImport } from "./routes/index";
 import { Route as ApiR2RouteImport } from "./routes/api.r2";
+========
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiHelloRouteImport } from './routes/api.hello'
+>>>>>>>> origin/main:.repos/alchemy-effect/examples/cloudflare-tanstack/src/routeTree.gen.ts
 
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
+<<<<<<<< HEAD:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Website/tanstack-dev-bindings-fixture/src/routeTree.gen.ts
 } as any);
 const ApiR2Route = ApiR2RouteImport.update({
   id: "/api/r2",
   path: "/api/r2",
+========
+} as any)
+const ApiHelloRoute = ApiHelloRouteImport.update({
+  id: '/api/hello',
+  path: '/api/hello',
+>>>>>>>> origin/main:.repos/alchemy-effect/examples/cloudflare-tanstack/src/routeTree.gen.ts
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 
 export interface FileRoutesByFullPath {
+<<<<<<<< HEAD:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Website/tanstack-dev-bindings-fixture/src/routeTree.gen.ts
   "/": typeof IndexRoute;
   "/api/r2": typeof ApiR2Route;
 }
@@ -47,10 +61,36 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute;
   ApiR2Route: typeof ApiR2Route;
+========
+  '/': typeof IndexRoute
+  '/api/hello': typeof ApiHelloRoute
+}
+export interface FileRoutesByTo {
+  '/': typeof IndexRoute
+  '/api/hello': typeof ApiHelloRoute
+}
+export interface FileRoutesById {
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/api/hello': typeof ApiHelloRoute
+}
+export interface FileRouteTypes {
+  fileRoutesByFullPath: FileRoutesByFullPath
+  fullPaths: '/' | '/api/hello'
+  fileRoutesByTo: FileRoutesByTo
+  to: '/' | '/api/hello'
+  id: '__root__' | '/' | '/api/hello'
+  fileRoutesById: FileRoutesById
+}
+export interface RootRouteChildren {
+  IndexRoute: typeof IndexRoute
+  ApiHelloRoute: typeof ApiHelloRoute
+>>>>>>>> origin/main:.repos/alchemy-effect/examples/cloudflare-tanstack/src/routeTree.gen.ts
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
+<<<<<<<< HEAD:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Website/tanstack-dev-bindings-fixture/src/routeTree.gen.ts
     "/": {
       id: "/";
       path: "/";
@@ -65,22 +105,43 @@ declare module "@tanstack/react-router" {
       preLoaderRoute: typeof ApiR2RouteImport;
       parentRoute: typeof rootRouteImport;
     };
+========
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/hello': {
+      id: '/api/hello'
+      path: '/api/hello'
+      fullPath: '/api/hello'
+      preLoaderRoute: typeof ApiHelloRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+>>>>>>>> origin/main:.repos/alchemy-effect/examples/cloudflare-tanstack/src/routeTree.gen.ts
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+<<<<<<<< HEAD:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Website/tanstack-dev-bindings-fixture/src/routeTree.gen.ts
   ApiR2Route: ApiR2Route,
 };
+========
+  ApiHelloRoute: ApiHelloRoute,
+}
+>>>>>>>> origin/main:.repos/alchemy-effect/examples/cloudflare-tanstack/src/routeTree.gen.ts
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>();
+  ._addFileTypes<FileRouteTypes>()
 
-import type { getRouter } from "./router.tsx";
-import type { createStart } from "@tanstack/react-start";
-declare module "@tanstack/react-start" {
+import type { getRouter } from './router.tsx'
+import type { createStart } from '@tanstack/react-start'
+declare module '@tanstack/react-start' {
   interface Register {
-    ssr: true;
-    router: Awaited<ReturnType<typeof getRouter>>;
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
   }
 }

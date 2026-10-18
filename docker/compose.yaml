@@ -20,6 +20,8 @@ services:
     restart: unless-stopped
 
   codewise:
+    image: ${CODEWISE_IMAGE:-ghcr.io/andreasmolnardev/codewise:latest}
+    pull_policy: always
     build:
       context: ..
       dockerfile: docker/Dockerfile.prod

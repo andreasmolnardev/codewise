@@ -88,6 +88,41 @@ test.provider(
   },
 );
 
+// `FunctionConfig.Comment` is patched optional in
+// distilled/packages/aws/patches/cloudfront.json — CloudFront omits `Comment`
+// in `listFunctions` responses for functions created without one, and a
+// comment-less function anywhere in the account used to fail the decode with
+// `SchemaError: Missing key ... FunctionConfig.Comment`.
+test.provider(
+  "list enumerates the deployed CloudFront Function",
+  (stack) =>
+    Effect.gen(function* () {
+      yield* stack.destroy();
+
+      const deployed = yield* stack.deploy(
+        Effect.gen(function* () {
+          return yield* AWS.CloudFront.Function("ListFn", {
+            comment: "list handler",
+            code: `async function handler(event) {
+  return event.request;
+}`,
+          });
+        }),
+      );
+
+      const provider = yield* Provider.findProvider(Function);
+      const all = yield* provider.list();
+
+      expect(all.some((fn) => fn.functionName === deployed.functionName)).toBe(
+        true,
+      );
+
+      yield* stack.destroy();
+      yield* assertFunctionDeleted(deployed.functionName);
+    }),
+  { timeout: 300_000 },
+);
+
 const assertFunctionDeleted = (name: string) =>
   cloudfront
     .describeFunction({

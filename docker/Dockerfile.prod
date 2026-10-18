@@ -76,5 +76,6 @@ ENV HOME=/home/codewise \
     T3CODE_TAILSCALE_SERVE=false
 
 EXPOSE 3773
+USER 1000:1000
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/codewise-entrypoint"]
 CMD ["node", "/opt/codewise/apps/server/dist/bin.mjs", "serve", "--base-dir", "/var/lib/codewise", "--host", "0.0.0.0", "--port", "3773", "--no-browser", "/workspaces"]

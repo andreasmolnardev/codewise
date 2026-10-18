@@ -137,6 +137,18 @@ test.provider(
   { tags: ["provider:aws", "provider:aws:cloudfront", "live"] },
 );
 
+test.provider(
+  "list returns [] for the non-listable ephemeral invalidation",
+  () =>
+    Effect.gen(function* () {
+      const provider = yield* Provider.findProvider(
+        AWS.CloudFront.Invalidation,
+      );
+      const all = yield* provider.list();
+      expect(all).toEqual([]);
+    }),
+);
+
 const assertDistributionDeleted = (distributionId: string) =>
   cloudfront.getDistribution({ Id: distributionId }).pipe(
     Effect.flatMap(() => Effect.fail(new Error("DistributionStillExists"))),

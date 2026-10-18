@@ -209,6 +209,9 @@ export const make = (
         executeValuesUnprepared(sql, params) {
           return runValues(sql, params)
         },
+        executeValuesUnprepared(sql, params) {
+          return run(sql, params, true)
+        },
         executeUnprepared(sql, params, transformRows) {
           return this.execute(sql, params, transformRows)
         },
