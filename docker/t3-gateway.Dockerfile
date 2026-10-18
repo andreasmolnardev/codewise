@@ -5,6 +5,8 @@ WORKDIR /src
 RUN corepack enable
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 make g++ git && rm -rf /var/lib/apt/lists/*
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.base.json ./
+COPY third-party-licenses.config.json ./
+COPY native/libghostty-vt/LICENSE ./native/libghostty-vt/LICENSE
 COPY patches ./patches
 COPY apps ./apps
 COPY packages ./packages
