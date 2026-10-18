@@ -7,21 +7,20 @@ import { cn } from "~/lib/utils";
 import {
   Autocomplete,
   AutocompleteCollection,
-  AutocompleteEmpty,
   AutocompleteGroup,
   AutocompleteGroupLabel,
   AutocompleteInput,
   AutocompleteItem,
   AutocompleteList,
-  AutocompleteSeparator,
+  AutocompleteListHeading,
+  AutocompleteListVirtualized,
 } from "~/components/ui/autocomplete";
 import { DIALOG_BACKDROP_CLASS, DIALOG_POPUP_CLASS } from "~/components/ui/dialog-styles";
+import { Button } from "~/components/ui/button";
 
 const CommandDialog = CommandDialogPrimitive.Root;
 
 const CommandDialogPortal = CommandDialogPrimitive.Portal;
-
-const CommandCreateHandle = CommandDialogPrimitive.createHandle;
 
 function CommandDialogTrigger(props: CommandDialogPrimitive.Trigger.Props) {
   return <CommandDialogPrimitive.Trigger data-slot="command-dialog-trigger" {...props} />;
@@ -96,23 +95,20 @@ function Command({
 
 function CommandInput({
   className,
-  wrapperClassName,
   placeholder,
   ...props
-}: React.ComponentProps<typeof AutocompleteInput> & {
-  wrapperClassName?: string | undefined;
-}) {
+}: React.ComponentProps<typeof AutocompleteInput>) {
   return (
-    <div className={cn("px-1.25 py-1.5", wrapperClassName)}>
+    <div className="px-[var(--command-shell-inset)] py-1.5 [&_[data-slot=autocomplete-start-addon]]:ps-[calc(var(--command-shell-inset)+0.0625rem)]">
       <AutocompleteInput
         autoFocus
         className={cn(
-          "border-transparent! bg-transparent! shadow-none before:hidden has-focus-visible:ring-0 placeholder:text-muted-foreground/80 *:data-[slot=autocomplete-input]:ps-9! sm:*:data-[slot=autocomplete-input]:ps-8.5!",
+          "border-transparent! bg-transparent! shadow-none before:hidden has-focus-visible:ring-0 placeholder:text-placeholder *:data-[slot=autocomplete-input]:ps-9! sm:*:data-[slot=autocomplete-input]:ps-[calc(var(--command-shell-inset)+1.5rem)]!",
           className,
         )}
         placeholder={placeholder}
         size="lg"
-        startAddon={<SearchIcon className="translate-x-0.5 text-muted-foreground" />}
+        startAddon={<SearchIcon className="translate-x-0.5 text-icon-muted" />}
         {...props}
       />
     </div>
@@ -129,13 +125,25 @@ function CommandList({ className, ...props }: React.ComponentProps<typeof Autoco
   );
 }
 
-function CommandEmpty({ className, ...props }: React.ComponentProps<typeof AutocompleteEmpty>) {
+function CommandListVirtualized({
+  className,
+  ...props
+}: React.ComponentProps<typeof AutocompleteListVirtualized>) {
   return (
-    <AutocompleteEmpty
-      className={cn("not-empty:py-6", className)}
-      data-slot="command-empty"
+    <AutocompleteListVirtualized
+      className={cn("flex max-h-[inherit] flex-col", className)}
+      data-slot="command-list"
       {...props}
     />
+  );
+}
+
+function CommandListHeading({
+  className,
+  ...props
+}: React.ComponentProps<typeof AutocompleteListHeading>) {
+  return (
+    <AutocompleteListHeading className={className} data-slot="command-group-label" {...props} />
   );
 }
 
@@ -168,27 +176,25 @@ function CommandCollection({ ...props }: React.ComponentProps<typeof Autocomplet
   return <AutocompleteCollection data-slot="command-collection" {...props} />;
 }
 
-function CommandItem({ className, ...props }: React.ComponentProps<typeof AutocompleteItem>) {
+// Pass `active` when the palette tracks the highlighted row itself; the
+// primitive's hover and keyboard highlight are then ignored so the two never
+// disagree, and the row shows the active surface instead.
+function CommandItem({
+  className,
+  active,
+  ...props
+}: React.ComponentProps<typeof AutocompleteItem> & { active?: boolean }) {
   return (
     <AutocompleteItem
       className={cn(
         "py-1.5 data-selected:bg-foreground/[0.06] data-highlighted:bg-foreground/[0.09] data-highlighted:text-foreground [&[data-highlighted][data-selected]]:bg-foreground/[0.09] [&[data-highlighted][data-selected]]:text-foreground",
+        active !== undefined &&
+          "cursor-pointer hover:bg-transparent hover:text-inherit data-highlighted:bg-transparent data-highlighted:text-inherit data-selected:bg-transparent data-selected:text-inherit [&[data-highlighted][data-selected]]:bg-transparent [&[data-highlighted][data-selected]]:text-inherit",
+        active && "bg-accent! text-accent-foreground!",
         className,
       )}
+      data-active={active || undefined}
       data-slot="command-item"
-      {...props}
-    />
-  );
-}
-
-function CommandSeparator({
-  className,
-  ...props
-}: React.ComponentProps<typeof AutocompleteSeparator>) {
-  return (
-    <AutocompleteSeparator
-      className={cn("my-2", className)}
-      data-slot="command-separator"
       {...props}
     />
   );
@@ -198,7 +204,7 @@ function CommandShortcut({ className, ...props }: React.ComponentProps<"kbd">) {
   return (
     <kbd
       className={cn(
-        "ms-auto font-medium font-sans text-muted-foreground/70 text-xs tracking-widest",
+        "ms-auto font-medium font-sans text-secondary-label text-xs tracking-widest",
         className,
       )}
       data-slot="command-shortcut"
@@ -211,7 +217,7 @@ function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {
   return (
     <div
       className={cn(
-        "relative flex items-center justify-between gap-2 rounded-b-[calc(var(--radius-2xl)-1px)] bg-foreground/[0.025] px-4 py-2.5 font-medium text-sm text-muted-foreground [&_[data-slot=kbd-group]]:font-sans [&_[data-slot=kbd]]:bg-foreground/[0.08] [&_[data-slot=kbd]]:text-foreground [&_[data-slot=kbd]]:ring-0",
+        "relative flex items-center justify-between gap-2 rounded-b-[calc(var(--radius-2xl)-1px)] bg-foreground/[0.025] px-[var(--command-content-inset)] py-2.5 font-medium text-sm text-muted-foreground [&_[data-slot=kbd-group]]:font-sans [&_[data-slot=kbd]]:bg-foreground/[0.08] [&_[data-slot=kbd]]:text-foreground [&_[data-slot=kbd]]:ring-0",
         className,
       )}
       data-slot="command-footer"
@@ -220,21 +226,35 @@ function CommandFooter({ className, ...props }: React.ComponentProps<"div">) {
   );
 }
 
+function CommandFooterAction({
+  className,
+  ...props
+}: Omit<React.ComponentProps<typeof Button>, "size" | "variant">) {
+  return (
+    <Button
+      {...props}
+      variant="ghost-muted"
+      size="xs"
+      className={cn("h-auto px-2 text-xs hover:bg-transparent", className)}
+    />
+  );
+}
+
 export {
-  CommandCreateHandle,
   Command,
   CommandCollection,
   CommandDialog,
   CommandDialogPopup,
   CommandDialogTrigger,
-  CommandEmpty,
   CommandFooter,
+  CommandFooterAction,
   CommandGroup,
   CommandGroupLabel,
   CommandInput,
   CommandItem,
   CommandList,
+  CommandListHeading,
+  CommandListVirtualized,
   CommandPanel,
-  CommandSeparator,
   CommandShortcut,
 };

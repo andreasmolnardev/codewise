@@ -1,0 +1,15 @@
+{
+  "name": "@subpolar/db-local",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@subpolar/shared": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test test"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@subpolar/environments",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "subpolar": "./src/admin-cli.ts",
+    "subpolar-manager": "./src/manager-cli.ts"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./docker": "./src/docker.ts",
+    "./docker-engine": "./src/docker-engine.ts",
+    "./admin-cli": "./src/admin-cli.ts",
+    "./manager-client": "./src/manager-client.ts",
+    "./manager-http": "./src/manager-http.ts",
+    "./manager": "./src/manager.ts",
+    "./persistence": "./src/persistence.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc-rs --noEmit",
+    "test": "bun test test"
+  }
+}

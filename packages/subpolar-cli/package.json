@@ -1,0 +1,22 @@
+{
+  "name": "@subpolar/runtime-cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "subpolar-cli": "./src/cli.ts"
+  },
+  "exports": {
+    ".": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun ./src/cli.ts",
+    "test": "bun test test"
+  },
+  "dependencies": {
+    "@subpolar/db-local": "workspace:*",
+    "@subpolar/runtime-pi": "workspace:*",
+    "@subpolar/shared": "workspace:*",
+    "@subpolar/runtime": "workspace:*"
+  }
+}

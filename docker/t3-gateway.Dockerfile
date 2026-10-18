@@ -1,0 +1,87 @@
+# syntax=docker/dockerfile:1.7
+FROM node:24.13.1-bookworm-slim AS build
+
+WORKDIR /src
+RUN corepack enable
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates python3 make g++ git && rm -rf /var/lib/apt/lists/*
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml vite.config.ts tsconfig.base.json ./
+COPY third-party-licenses.config.json ./
+COPY native/libghostty-vt/LICENSE ./native/libghostty-vt/LICENSE
+COPY patches ./patches
+COPY apps ./apps
+COPY packages ./packages
+COPY scripts ./scripts
+COPY oxlint-plugin-t3code ./oxlint-plugin-t3code
+RUN pnpm install --filter @t3tools/web... --filter t3... --frozen-lockfile
+RUN pnpm --filter @t3tools/web build
+RUN pnpm --filter t3 build:bundle
+
+FROM oven/bun:1.3.14 AS bun-runtime
+
+FROM node:24.13.1-bookworm-slim AS runtime
+ARG CODEX_VERSION=0.98.0
+ARG OPENCODE_VERSION=1.3.15
+ARG SUBPOLAR_PI_SDK_VERSION=1.3.0
+ARG SOURCE_REVISION=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.source="https://github.com/pingdotgg/t3code" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.codex.version="${CODEX_VERSION}" \
+      org.opencontainers.image.opencode.version="${OPENCODE_VERSION}"
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl git openssh-client tini util-linux python3 make g++ \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 1000 codewise || true \
+ && useradd --uid 1000 --gid 1000 --create-home --shell /bin/bash codewise || true \
+ && corepack enable \
+ && npm install --global --omit=dev "@openai/codex@${CODEX_VERSION}" "opencode-ai@${OPENCODE_VERSION}" \
+    "@earendil-works/pi-coding-agent@${SUBPOLAR_PI_SDK_VERSION}" \
+ && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends gh docker.io \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/codewise
+COPY --from=bun-runtime /usr/local/bin/bun /usr/local/bin/bun
+COPY --from=build /src/apps/server/dist ./apps/server/dist
+COPY --from=build /src/apps/web/dist ./apps/web/dist
+COPY --from=build /src/node_modules ./node_modules
+COPY --from=build /src/apps/server/node_modules ./apps/server/node_modules
+COPY --from=build /src/packages/effect-acp ./packages/effect-acp
+COPY --from=build /src/packages/subpolar-acp ./packages/subpolar-acp
+COPY --from=build /src/packages/subpolar-contracts ./packages/subpolar-contracts
+COPY --from=build /src/packages/subpolar-core ./packages/subpolar-core
+COPY --from=build /src/packages/subpolar-core-pi ./packages/subpolar-core-pi
+COPY --from=build /src/packages/subpolar-environments ./packages/subpolar-environments
+COPY --from=build /src/packages/subpolar-operations ./packages/subpolar-operations
+COPY --from=build /src/packages/subpolar-openapi ./packages/subpolar-openapi
+COPY --from=build /src/packages/subpolar-persistance-local ./packages/subpolar-persistance-local
+COPY --from=build /src/packages/subpolar-cli ./packages/subpolar-cli
+COPY --from=build /src/packages/subpolar-runtime-host ./packages/subpolar-runtime-host
+COPY --from=build /src/packages/subpolar-tools ./packages/subpolar-tools
+COPY docker/entrypoint.sh /usr/local/bin/codewise-entrypoint
+COPY docker/backup.mjs docker/restore-validate.mjs /usr/local/lib/codewise/
+RUN chmod 0755 /usr/local/bin/codewise-entrypoint \
+ && mkdir -p /opt/codewise/node_modules/@earendil-works \
+ && ln -s "$(npm root -g)/@earendil-works/pi-coding-agent" /opt/codewise/node_modules/@earendil-works/pi-coding-agent \
+ && mkdir -p /var/lib/codewise /workspaces /home/codewise/.codex /home/codewise/.config/opencode /home/codewise/.config/gh /home/codewise/.ssh \
+ && chown -R 1000:1000 /var/lib/codewise /workspaces /home/codewise
+
+ENV HOME=/home/codewise \
+    CODEX_HOME=/home/codewise/.codex \
+    XDG_CONFIG_HOME=/home/codewise/.config \
+    T3CODE_CONTAINER=true \
+    T3CODE_HOME=/var/lib/codewise \
+    T3CODE_PORT=3773 \
+    T3CODE_HOST=0.0.0.0 \
+    T3CODE_NO_BROWSER=true \
+    T3CODE_TAILSCALE_SERVE=false
+
+EXPOSE 3773
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/codewise-entrypoint"]
+CMD ["node", "/opt/codewise/apps/server/dist/bin.mjs", "serve", "--base-dir", "/var/lib/codewise", "--host", "0.0.0.0", "--port", "3773", "--no-browser", "/workspaces"]

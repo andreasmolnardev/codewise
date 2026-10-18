@@ -1,0 +1,35 @@
+{
+  "name": "@subpolar/acp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./src/index.ts"
+    }
+  },
+  "bin": {
+    "subpolar-acp": "./src/cli.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc-rs --noEmit",
+    "test": "vp test run --config ../../vite.config.ts --dir ."
+  },
+  "dependencies": {
+    "@subpolar/environments": "workspace:*",
+    "@subpolar/shared": "workspace:*",
+    "@subpolar/tools": "workspace:*",
+    "@subpolar/runtime": "workspace:*",
+    "@subpolar/runtime-host": "workspace:*",
+    "@subpolar/runtime-pi": "workspace:*",
+    "@effect/platform-node": "catalog:",
+    "effect": "catalog:",
+    "effect-acp": "workspace:*"
+  },
+  "devDependencies": {
+    "@effect/vitest": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "name": "@subpolar/runtime-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@subpolar/runtime": "workspace:*",
+    "@subpolar/runtime-pi": "workspace:*",
+    "@subpolar/shared": "workspace:*"
+  },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  },
+  "scripts": {
+    "typecheck": "tsc-rs --noEmit",
+    "test": "bun test test"
+  }
+}

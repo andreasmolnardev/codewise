@@ -1,0 +1,7 @@
+services:
+  codewise:
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+    depends_on:
+      docker-proxy:
+        condition: service_healthy

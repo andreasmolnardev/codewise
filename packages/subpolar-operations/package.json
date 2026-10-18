@@ -1,0 +1,15 @@
+{
+  "name": "@subpolar/shared-operations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test test"
+  },
+  "dependencies": {
+    "@subpolar/shared": "workspace:*"
+  }
+}

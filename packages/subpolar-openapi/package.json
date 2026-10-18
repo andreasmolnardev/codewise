@@ -1,0 +1,19 @@
+{
+  "name": "@subpolar/openapi",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "bun test test",
+    "typecheck": "tsc-rs --noEmit"
+  },
+  "dependencies": {
+    "@subpolar/tools": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
+  }
+}

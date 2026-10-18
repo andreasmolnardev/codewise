@@ -1,4 +1,4 @@
-// @effect-diagnostics nodeBuiltinImport:off globalDate:off - This host-side fixture creates an isolated local T3 environment.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - This host-side fixture creates an isolated local T3 environment.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -11,7 +11,14 @@ export const SHOWCASE_PROJECT_ID = "t3code";
 export const SHOWCASE_THREAD_ID = "remote-command-center";
 export const SHOWCASE_TERMINAL_ID = "term-1";
 
-export const SHOWCASE_SCENES = ["threads", "thread", "terminal", "review", "environments"] as const;
+export const SHOWCASE_SCENES = [
+  "threads",
+  "thread",
+  "terminal",
+  "review",
+  "environments",
+  "agent-activity",
+] as const;
 export type ShowcaseScene = (typeof SHOWCASE_SCENES)[number];
 
 const PROJECTOR_NAMES = [
@@ -44,17 +51,23 @@ const PROJECT_SCRIPTS = JSON.stringify([
   },
 ]);
 
+const SHOWCASE_TERMINAL_PROMPT =
+  "\u001b[1;32m→\u001b[0m \u001b[1;36mt3code\u001b[0m \u001b[1;34mgit:(\u001b[1;31mfeat/remote-command-center\u001b[1;34m)\u001b[0m \u001b[1;33m✗\u001b[0m ";
+
 export const SHOWCASE_TERMINAL_BUFFER = [
-  "\u001b[38;5;75m~/Code/t3code\u001b[0m \u001b[38;5;212mfeat/remote-command-center\u001b[0m",
-  "$ vp test run --changed",
+  `${SHOWCASE_TERMINAL_PROMPT}vpr dev`,
   "",
-  "  \u001b[38;5;117mt3code-mobile\u001b[0m       184 passed",
-  "  \u001b[38;5;213mclient-runtime\u001b[0m      263 passed",
-  "  \u001b[38;5;221mserver\u001b[0m              165 passed",
+  "  \u001b[1;32mVITE\u001b[0m \u001b[32mv7.1.1\u001b[0m  \u001b[2mready in\u001b[0m \u001b[1m1.24s\u001b[0m",
   "",
-  "\u001b[32m✨ 612 tests passed\u001b[0m  ·  3 environments online",
+  "  \u001b[32m→\u001b[0m  \u001b[2mLocal:\u001b[0m    \u001b[4;36mhttp://127.0.0.1:5173/\u001b[0m",
+  "  \u001b[32m→\u001b[0m  \u001b[2mNetwork:\u001b[0m  \u001b[4;36mhttp://192.168.1.24:5173/\u001b[0m",
+  "  \u001b[32m→\u001b[0m  \u001b[2mProject:\u001b[0m  \u001b[1mt3code\u001b[0m \u001b[2m— ~/Code/t3code\u001b[0m",
   "",
-  "\u001b[38;5;75m~/Code/t3code\u001b[0m \u001b[38;5;212mfeat/remote-command-center\u001b[0m $ ",
+  "  \u001b[32m✓ 612 passed\u001b[0m   \u001b[33m△ 2 warnings\u001b[0m   \u001b[31m✗ 0 failed\u001b[0m",
+  "",
+  "  \u001b[42;30m READY \u001b[0m \u001b[2mwatching for changes — press\u001b[0m \u001b[1mq\u001b[0m \u001b[2mto quit\u001b[0m",
+  "",
+  SHOWCASE_TERMINAL_PROMPT,
 ].join("\r\n");
 
 const BASE_ENVIRONMENT_PRESENCE = `export function environmentLabel(count: number): string {
@@ -188,6 +201,7 @@ export const SHOWCASE_THREADS = [
       "Keep hydration errors precise, but make the development copy unexpectedly delightful.",
     response:
       "The diagnostics still lead with the exact mismatch and component stack. A tiny optional haiku now closes the expanded explanation.",
+    snoozeMinutes: 90,
   },
   {
     id: "beautiful-boot",
@@ -201,10 +215,17 @@ export const SHOWCASE_THREADS = [
     response:
       "The plan groups milestones without changing the underlying log stream, preserves plain-text output, and adds zero work to the hot path.",
   },
-  // Finished work, settled by hand: the list keeps it as a receded tail so
-  // the active block above reads as everything still in flight. The active
-  // block stays small enough that the settled tail begins above the fold —
-  // a store screenshot has to show that history exists, not just imply it.
+  {
+    id: "patient-penguins",
+    projectId: "linux",
+    title: "Teach penguins to wait patiently",
+    branch: "feat/patient-penguins",
+    minutesAgo: 52,
+    request: "Make delayed work easier to follow without adding noise to the scheduler trace.",
+    response:
+      "Delayed work now carries a concise reason through the trace, so the wait is legible without changing scheduling behavior.",
+    snoozeMinutes: 8 * 60,
+  },
   {
     id: "handoff-haptics",
     projectId: "t3code",
@@ -327,20 +348,29 @@ function insertThread(
     readonly minutesAgo: number;
     readonly state?: "working" | "approval" | "plan";
     readonly settled?: boolean;
+    readonly snoozeMinutes?: number;
     readonly workspaceRoot: string;
   },
 ): void {
   const turnId = `${input.id}-turn`;
   const updatedAt = minutesBefore(now, input.minutesAgo);
   const isWorking = input.state === "working";
+  const snoozedUntil =
+    input.snoozeMinutes === undefined
+      ? null
+      : new Date(now + input.snoozeMinutes * 60_000).toISOString();
+  const snoozedAt =
+    input.snoozeMinutes === undefined
+      ? null
+      : minutesBefore(now, Math.max(1, Math.floor(input.minutesAgo / 2)));
   database
     .prepare(
       `INSERT INTO projection_threads (
         thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
         branch, worktree_path, latest_turn_id, latest_user_message_at, pending_approval_count,
         pending_user_input_count, has_actionable_proposed_plan, created_at, updated_at,
-        archived_at, deleted_at, settled_override, settled_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, ?, ?)`,
+        archived_at, deleted_at, settled_override, settled_at, snoozed_until, snoozed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
     )
     .run(
       input.id,
@@ -359,6 +389,8 @@ function insertThread(
       updatedAt,
       input.settled ? "settled" : null,
       input.settled ? updatedAt : null,
+      snoozedUntil,
+      snoozedAt,
     );
   database
     .prepare(
@@ -387,6 +419,61 @@ function insertThread(
     .run(input.id, isWorking ? "running" : "ready", isWorking ? turnId : null, updatedAt);
 }
 
+// V1 tables this seed owns. `projection_projects` is not listed: V2 still
+// stores projects there, so the seed upserts its own rows instead. V2 clients
+// do not read the V1 thread rows; moving the seed to V2 is tracked in
+// https://github.com/pingdotgg/t3code/issues/15013.
+const SEEDED_V1_TABLES = [
+  "projection_pending_approvals",
+  "projection_thread_proposed_plans",
+  "projection_thread_activities",
+  "projection_thread_messages",
+  "projection_thread_sessions",
+  "projection_turns",
+  "projection_threads",
+  "projection_state",
+] as const;
+
+const SEEDED_PROJECTION_TABLES = [...SEEDED_V1_TABLES, "projection_projects"] as const;
+
+const SEEDED_THREAD_COLUMNS = ["snoozed_until", "snoozed_at"] as const;
+
+function hasSeedableSchema(dbPath: string): boolean {
+  let database: NodeSqlite.DatabaseSync;
+  try {
+    database = new NodeSqlite.DatabaseSync(dbPath, { readOnly: true });
+  } catch {
+    return false;
+  }
+  try {
+    const tableCount = database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name IN (${SEEDED_PROJECTION_TABLES.map(() => "?").join(", ")})`,
+      )
+      .get(...SEEDED_PROJECTION_TABLES) as { count: number };
+    if (tableCount.count !== SEEDED_PROJECTION_TABLES.length) return false;
+
+    const threadColumns = database.prepare("PRAGMA table_info(projection_threads)").all() as Array<{
+      name: string;
+    }>;
+    const threadColumnNames = new Set(threadColumns.map((column) => column.name));
+    return SEEDED_THREAD_COLUMNS.every((column) => threadColumnNames.has(column));
+  } catch {
+    return false;
+  } finally {
+    database.close();
+  }
+}
+
+async function waitForSeedableSchema(dbPath: string, timeoutMs = 60_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (hasSeedableSchema(dbPath)) return;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`The environment server did not migrate ${dbPath} within ${timeoutMs}ms.`);
+}
+
 function seedDatabase(
   dbPath: string,
   workspaceRoots: ReadonlyMap<string, string>,
@@ -401,21 +488,11 @@ function seedDatabase(
   const database = new NodeSqlite.DatabaseSync(dbPath, { timeout: 30_000 });
   try {
     database.exec("BEGIN IMMEDIATE");
-    for (const table of [
-      "projection_pending_approvals",
-      "projection_thread_proposed_plans",
-      "projection_thread_activities",
-      "projection_thread_messages",
-      "projection_thread_sessions",
-      "projection_turns",
-      "projection_threads",
-      "projection_projects",
-      "projection_state",
-    ]) {
+    for (const table of SEEDED_V1_TABLES) {
       database.exec(`DELETE FROM ${table}`);
     }
     const insertProject = database.prepare(
-      `INSERT INTO projection_projects (
+      `INSERT OR REPLACE INTO projection_projects (
           project_id, title, workspace_root, default_model_selection_json, scripts_json,
           created_at, updated_at, deleted_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)`,
@@ -544,9 +621,7 @@ function seedDatabase(
     // replace the one that actually explains the failure.
     try {
       database.exec("ROLLBACK");
-    } catch {
-      // Nothing to roll back.
-    }
+    } catch {}
     throw error;
   } finally {
     database.close();
@@ -576,7 +651,7 @@ export async function seedShowcaseEnvironment(input: {
   if (!primaryProject) throw new Error("The primary showcase workspace is not configured.");
   const workspaceRoot = workspaceRoots.get(primaryProject.id);
   if (!workspaceRoot) throw new Error("The primary showcase workspace is not configured.");
-  const dbPath = NodePath.join(input.baseDir, "userdata", "state.sqlite");
+  const dbPath = NodePath.join(input.baseDir, "userdata", "statev2.sqlite");
   if (primaryProject.id === SHOWCASE_PROJECT_ID) {
     await seedT3CodeWorkspace(workspaceRoot);
   }
@@ -594,6 +669,9 @@ export async function seedShowcaseEnvironment(input: {
         });
       }),
   );
+  // The environment server begins listening before it finishes migrating the
+  // database, so wait for the schema before deleting from and reseeding it.
+  await waitForSeedableSchema(dbPath);
   seedDatabase(dbPath, workspaceRoots, projects, threads, now);
 
   const terminalDirectory = NodePath.join(input.baseDir, "userdata", "logs", "terminals");

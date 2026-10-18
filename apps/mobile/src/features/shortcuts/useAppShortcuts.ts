@@ -16,12 +16,6 @@ import {
   withRecentThreadShortcut,
 } from "./appShortcuts";
 
-/**
- * Owns the launcher app shortcuts (Android long-press menu): keeps the
- * static "New task" entry plus the recently opened threads in sync, and
- * routes shortcut taps — cold start included — to their in-app screens.
- * Mounted once in the root stack layout.
- */
 export function useAppShortcuts(state: NavigationState): void {
   useShortcutNavigation();
   useRecentThreadShortcutSync(state);
@@ -54,7 +48,14 @@ function useShortcutNavigation(): void {
 }
 
 function useRecentThreadShortcutSync(state: NavigationState): void {
-  const threadRef = useMemo(() => activeThreadRef(state), [state]);
+  // Launcher shortcuts are Android-only. A null ref on iOS keeps this hook
+  // (mounted in the root stack layout) from subscribing the root to the
+  // active thread's shell, which would re-render every screen on each
+  // title/status/session change.
+  const threadRef = useMemo(
+    () => (Platform.OS === "android" ? activeThreadRef(state) : null),
+    [state],
+  );
   const threadShell = useThreadShell(threadRef);
   // null until the persisted list loads; recording waits on it so the first
   // thread opened after a cold start cannot clobber older entries.
@@ -101,8 +102,6 @@ function useRecentThreadShortcutSync(state: NavigationState): void {
       return;
     }
 
-    // withRecentThreadShortcut returns the same array when nothing changed,
-    // so React bails out and the persist effect below does not re-fire.
     setRecents((current) => {
       if (current === null) {
         return current;

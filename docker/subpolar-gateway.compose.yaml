@@ -1,0 +1,96 @@
+name: codewise-subpolar
+
+services:
+  gateway:
+    build:
+      context: ..
+      dockerfile: docker/t3-gateway.Dockerfile
+      args:
+        SOURCE_REVISION: ${SOURCE_REVISION:-unknown}
+        BUILD_DATE: ${BUILD_DATE:-unknown}
+    ports:
+      - "127.0.0.1:${T3CODE_PORT:-3773}:3773"
+    environment:
+      SUBPOLAR_MANAGER_URL: http://subpolar-manager:8787
+      SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP: "true"
+      SUBPOLAR_MANAGER_TOKEN: ${SUBPOLAR_MANAGER_TOKEN:?set a random manager token of at least 32 characters}
+      SUBPOLAR_STORAGE_ROOT: /workspaces
+      SUBPOLAR_ACP_EXECUTION: managed
+      SUBPOLAR_ACP_WORKER_COMMAND: '["/usr/local/bin/subpolar-acp-worker"]'
+      SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS: ${SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS:-}
+    volumes:
+      - codewise-state:/var/lib/codewise
+      - ${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}:/workspaces
+      - codex-home:/home/codewise/.codex
+      - opencode-config:/home/codewise/.config/opencode
+      - gh-config:/home/codewise/.config/gh
+      - ssh-config:/home/codewise/.ssh
+    networks: [gateway-control, gateway-outbound]
+    depends_on:
+      subpolar-manager:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3773/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+  subpolar-manager:
+    build:
+      context: ..
+      dockerfile: docker/subpolar-manager.Dockerfile
+    environment:
+      SUBPOLAR_MANAGER_HOST: 0.0.0.0
+      SUBPOLAR_MANAGER_PORT: 8787
+      SUBPOLAR_MANAGER_TOKEN: ${SUBPOLAR_MANAGER_TOKEN:?set a random manager token of at least 32 characters}
+      SUBPOLAR_GATEWAY_STORAGE_ROOT: /workspaces
+      SUBPOLAR_DOCKER_HOST_STORAGE_ROOT: ${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}
+      SUBPOLAR_CONTAINER_STORAGE_ROOT: /workspaces
+      SUBPOLAR_WORKER_IMAGE: ${SUBPOLAR_WORKER_IMAGE:-codewise-subpolar-worker:local}
+      SUBPOLAR_DOCKER_SOCKET: /var/run/docker.sock
+      SUBPOLAR_REGISTRATION_FILE: /var/lib/subpolar/environments.json
+      SUBPOLAR_GATEWAY_GIT_ROOT: ${SUBPOLAR_GATEWAY_GIT_ROOT:-}
+      SUBPOLAR_DOCKER_HOST_GIT_ROOT: ${SUBPOLAR_DOCKER_HOST_GIT_ROOT:-}
+      SUBPOLAR_ALLOWED_DEVCONTAINER_FEATURES: ${SUBPOLAR_ALLOWED_DEVCONTAINER_FEATURES:-}
+      SUBPOLAR_DEFAULT_DEVCONTAINER_CONFIG: ${SUBPOLAR_DEFAULT_DEVCONTAINER_CONFIG:-}
+      SUBPOLAR_ENABLE_DEVCONTAINER_COMPOSE: ${SUBPOLAR_ENABLE_DEVCONTAINER_COMPOSE:-false}
+    volumes:
+      - ${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}:/workspaces:ro
+      - ${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}:${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}:ro
+      - subpolar-manager-state:/var/lib/subpolar
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks: [gateway-control]
+    group_add:
+      - ${SUBPOLAR_DOCKER_GID:-999}
+    healthcheck:
+      test: [CMD, bun, -e, "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+
+  subpolar-worker-image:
+    profiles: [worker-image]
+    image: ${SUBPOLAR_WORKER_IMAGE:-codewise-subpolar-worker:local}
+    build:
+      context: ..
+      dockerfile: docker/subpolar-worker.Dockerfile
+    entrypoint: ["/bin/true"]
+    restart: "no"
+
+networks:
+  gateway-control:
+    internal: true
+  gateway-outbound: {}
+
+volumes:
+  codewise-state:
+  codex-home:
+  opencode-config:
+  gh-config:
+  ssh-config:
+  subpolar-manager-state:

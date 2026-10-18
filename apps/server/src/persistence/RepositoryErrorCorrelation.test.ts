@@ -1,14 +1,21 @@
-import { AuthSessionId, ThreadId, type AuthEnvironmentScope } from "@t3tools/contracts";
+import {
+  AuthSessionId,
+  ProviderInstanceId,
+  ProviderSessionId,
+  ThreadId,
+  type AuthEnvironmentScope,
+} from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 
 import * as AuthPairingLinks from "./AuthPairingLinks.ts";
 import * as AuthSessions from "./AuthSessions.ts";
 import * as PersistenceErrors from "./Errors.ts";
-import { SqlitePersistenceMemory } from "./Layers/Sqlite.ts";
+import * as SqlitePersistence from "./Sqlite.ts";
 import * as ProviderSessionRuntime from "./ProviderSessionRuntime.ts";
 
 const issuedAt = DateTime.makeUnsafe("2026-06-20T00:00:00.000Z");
@@ -16,15 +23,63 @@ const expiresAt = DateTime.makeUnsafe("2027-06-20T00:00:00.000Z");
 const now = DateTime.makeUnsafe("2026-06-21T00:00:00.000Z");
 const scopes: ReadonlyArray<AuthEnvironmentScope> = ["access:read"];
 
-const authSessionLayer = AuthSessions.layer.pipe(Layer.provideMerge(SqlitePersistenceMemory));
-const authPairingLinkLayer = AuthPairingLinks.layer.pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+const layerAuthSession = AuthSessions.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
+const layerAuthPairingLink = AuthPairingLinks.layer.pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
-const providerSessionRuntimeLayer = ProviderSessionRuntime.layer.pipe(
-  Layer.provideMerge(SqlitePersistenceMemory),
+const layerProviderSessionRuntime = ProviderSessionRuntime.layer.pipe(
+  Layer.provideMerge(SqlitePersistence.layerMemory),
 );
 
 describe("persistence error correlation", () => {
+  it.effect("updates Subpolar runtime status only for the matching provider session", () =>
+    Effect.gen(function* () {
+      const runtimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
+      const threadId = ThreadId.make("subpolar-status-thread");
+      const providerInstanceId = ProviderInstanceId.make("subpolar-instance");
+      const providerSessionId = ProviderSessionId.make("subpolar-session");
+      const lastSeenAt = "2026-06-20T00:00:00.000Z";
+
+      yield* runtimes.upsert({
+        threadId,
+        providerName: "subpolar",
+        providerInstanceId,
+        adapterKey: "subpolar/pi-acp",
+        runtimeMode: "approval-required",
+        status: "running",
+        lastSeenAt,
+        resumeCursor: null,
+        runtimePayload: {
+          subpolar: { acpSessionId: "acp-1", providerSessionId, piSessionId: "pi-1" },
+        },
+      });
+
+      yield* runtimes.updateStatusIfSubpolarSession({
+        threadId,
+        providerInstanceId,
+        providerSessionId: ProviderSessionId.make("replacement-session"),
+        status: "error",
+        lastSeenAt,
+      });
+      assert.equal(
+        Option.getOrUndefined(yield* runtimes.getByThreadId({ threadId }))?.status,
+        "running",
+      );
+
+      yield* runtimes.updateStatusIfSubpolarSession({
+        threadId,
+        providerInstanceId,
+        providerSessionId,
+        status: "stopped",
+        lastSeenAt,
+      });
+      assert.equal(
+        Option.getOrUndefined(yield* runtimes.getByThreadId({ threadId }))?.status,
+        "stopped",
+      );
+    }).pipe(Effect.provide(layerProviderSessionRuntime)),
+  );
+
   it.effect("correlates auth session SQL and row-decode failures without sensitive fields", () =>
     Effect.gen(function* () {
       const sessions = yield* AuthSessions.AuthSessionRepository;
@@ -101,7 +156,7 @@ describe("persistence error correlation", () => {
         "SQL error in AuthSessionRepository.revokeAllExcept:query",
       );
       assert.notInclude(revokeOtherError.message, DateTime.formatIso(now));
-    }).pipe(Effect.provide(authSessionLayer)),
+    }).pipe(Effect.provide(layerAuthSession)),
   );
 
   it.effect("correlates pairing-link create and revoke failures by id only", () =>
@@ -179,7 +234,7 @@ describe("persistence error correlation", () => {
       assert.deepStrictEqual(revokeError.correlation, { pairingLinkId: id });
       assert.notInclude(revokeError.message, credential);
       assert.notInclude(revokeError.message, DateTime.formatIso(now));
-    }).pipe(Effect.provide(authPairingLinkLayer)),
+    }).pipe(Effect.provide(layerAuthPairingLink)),
   );
 
   it.effect("skips undecodable provider runtime rows and correlates SQL failures by thread", () =>
@@ -256,6 +311,6 @@ describe("persistence error correlation", () => {
       );
       assert.notInclude(sqlFailure.message, runtimePayload);
       assert.notInclude(sqlFailure.message, lastSeenAt);
-    }).pipe(Effect.provide(providerSessionRuntimeLayer)),
+    }).pipe(Effect.provide(layerProviderSessionRuntime)),
   );
 });
