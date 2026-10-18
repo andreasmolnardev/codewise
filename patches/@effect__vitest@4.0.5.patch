@@ -1,9 +1,5 @@
 diff --git a/dist/index.d.ts b/dist/index.d.ts
-<<<<<<<< HEAD:patches/@effect__vitest@4.0.5.patch
 index 845cb4c..24ede42 100644
-========
-index bc52d20f3116059904e99498447451bd4083c0fe..43cf0824f9f294cb441d9ee4cc12de9f82c04e46 100644
->>>>>>>> origin/main:patches/@effect__vitest@4.0.0-beta.102.patch
 --- a/dist/index.d.ts
 +++ b/dist/index.d.ts
 @@ -10,14 +10,14 @@ import type * as Effect from "effect/Effect";
@@ -37,28 +33,11 @@ index 178cc74..9289296 100644
   * Invokes the Effect Vitest equality-tester registration hook.
   *
 diff --git a/dist/internal/internal.js b/dist/internal/internal.js
-<<<<<<<< HEAD:patches/@effect__vitest@4.0.5.patch
 index 7138319..4092c67 100644
 --- a/dist/internal/internal.js
 +++ b/dist/internal/internal.js
 @@ -12,7 +12,7 @@ import * as Schedule from "effect/Schedule";
  import * as Scope from "effect/Scope";
-========
-index 29ea5844d6c7db5f8ee9cb40eea09fa06306ac76..45461c6610983e6b55cb0b303f3064fe0e12574c 100644
---- a/dist/internal/internal.js
-+++ b/dist/internal/internal.js
-@@ -1,7 +1,7 @@
- /**
-  * @since 4.0.0
-  */
--import { getCurrentSuite } from "@vitest/runner";
-+import { getCurrentSuite } from "vite-plus/test/plugins/runner";
- import * as Cause from "effect/Cause";
- import * as Duration from "effect/Duration";
- import * as Effect from "effect/Effect";
-@@ -16,7 +16,7 @@ import * as Scope from "effect/Scope";
- import * as fc from "effect/testing/FastCheck";
->>>>>>>> origin/main:patches/@effect__vitest@4.0.0-beta.102.patch
  import * as TestClock from "effect/testing/TestClock";
  import * as TestConsole from "effect/testing/TestConsole";
 -import * as V from "vitest";
@@ -114,28 +93,11 @@ index 9d65132..4aadda8 100644
  /**
   * Vitest test API without additional fixtures.
 diff --git a/src/internal/internal.ts b/src/internal/internal.ts
-<<<<<<<< HEAD:patches/@effect__vitest@4.0.5.patch
 index b43385b..4da79fd 100644
 --- a/src/internal/internal.ts
 +++ b/src/internal/internal.ts
 @@ -14,7 +14,7 @@ import type * as Schema from "effect/Schema"
  import * as Scope from "effect/Scope"
-========
-index 59c35ec9e65c93df8e2ba21299a5b23f2ce27772..38475742e3d39e8cb30c5ab6a1a45916882cdca4 100644
---- a/src/internal/internal.ts
-+++ b/src/internal/internal.ts
-@@ -2,7 +2,7 @@
-  * @since 4.0.0
-  */
- 
--import { getCurrentSuite } from "@vitest/runner"
-+import { getCurrentSuite } from "vite-plus/test/plugins/runner"
- import * as Cause from "effect/Cause"
- import * as Duration from "effect/Duration"
- import * as Effect from "effect/Effect"
-@@ -17,7 +17,7 @@ import * as Scope from "effect/Scope"
- import * as fc from "effect/testing/FastCheck"
->>>>>>>> origin/main:patches/@effect__vitest@4.0.0-beta.102.patch
  import * as TestClock from "effect/testing/TestClock"
  import * as TestConsole from "effect/testing/TestConsole"
 -import * as V from "vitest"
@@ -144,17 +106,10 @@ index 59c35ec9e65c93df8e2ba21299a5b23f2ce27772..38475742e3d39e8cb30c5ab6a1a45916
  
  const getCurrentSuite = V.TestRunner.getCurrentSuite
 diff --git a/src/utils.ts b/src/utils.ts
-<<<<<<<< HEAD:patches/@effect__vitest@4.0.5.patch
 index 4473632..2d04404 100644
 --- a/src/utils.ts
 +++ b/src/utils.ts
 @@ -17,7 +17,7 @@ import * as Option from "effect/Option"
-========
-index 09c824139056c992bf978c15dc3836b3dd2257a9..6cd39bf9c0f332ba65842e555cc1c3fe0675e923 100644
---- a/src/utils.ts
-+++ b/src/utils.ts
-@@ -16,7 +16,7 @@ import * as Option from "effect/Option"
->>>>>>>> origin/main:patches/@effect__vitest@4.0.0-beta.102.patch
  import * as Predicate from "effect/Predicate"
  import * as Result from "effect/Result"
  import * as assert from "node:assert"
