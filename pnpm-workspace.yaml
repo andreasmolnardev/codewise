@@ -25,6 +25,9 @@ allowBuilds:
   tsc-rs: true
   utf-8-validate: false
   workerd: false
+  # These hooks only print a no-op message or dependency version guidance.
+  "@google/genai": false
+  protobufjs: false
 
 catalog:
   "@clerk/backend": 3.25.0
