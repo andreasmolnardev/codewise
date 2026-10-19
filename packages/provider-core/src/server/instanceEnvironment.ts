@@ -8,12 +8,13 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
   environment: ProviderInstanceEnvironment | undefined,
   baseEnv: NodeJS.ProcessEnv = process.env,
 ) {
+  const next: NodeJS.ProcessEnv = { ...baseEnv };
   if (!environment || environment.length === 0) {
-    return baseEnv;
+    delete next.SUBPOLAR_MANAGER_TOKEN;
+    return next;
   }
 
   const home = yield* HostProcess.HomeDirectory;
-  const next: NodeJS.ProcessEnv = { ...baseEnv };
   for (const variable of environment) {
     // Child processes do not apply shell expansion to environment values.
     next[variable.name] =
@@ -21,5 +22,8 @@ export const mergeProviderInstanceEnvironment = Effect.fn(function* (
         ? expandHomePath(variable.value, home)
         : variable.value;
   }
+  // The gateway uses this admin token to reach Subpolar's manager. It must
+  // never cross into a provider or terminal child process.
+  delete next.SUBPOLAR_MANAGER_TOKEN;
   return next;
 });

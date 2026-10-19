@@ -7,6 +7,23 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import { mergeProviderInstanceEnvironment } from "./instanceEnvironment.ts";
 
 describe("mergeProviderInstanceEnvironment", () => {
+  it.effect("does not pass the Subpolar manager admin token to child processes", () =>
+    Effect.gen(function* () {
+      expect(
+        yield* mergeProviderInstanceEnvironment([], {
+          PATH: "/bin",
+          SUBPOLAR_MANAGER_TOKEN: "gateway-admin-token",
+        }),
+      ).toEqual({ PATH: "/bin" });
+      expect(
+        yield* mergeProviderInstanceEnvironment(
+          [{ name: "SUBPOLAR_MANAGER_TOKEN", value: "configured-admin-token", sensitive: true }],
+          { PATH: "/bin", SUBPOLAR_MANAGER_TOKEN: "gateway-admin-token" },
+        ),
+      ).toEqual({ PATH: "/bin" });
+    }),
+  );
+
   it.effect.each([
     { value: "~/.account", tail: ".account" },
     { value: "~\\.account\\work", tail: ".account\\work" },
