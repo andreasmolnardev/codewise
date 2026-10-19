@@ -4,8 +4,9 @@ export function bindSubpolarProviderInstanceEnvironment(
   configuredInstanceToken?: string,
 ): NodeJS.ProcessEnv {
   const bound = { ...environment, SUBPOLAR_PROVIDER_INSTANCE_ID: instanceId };
-  // A host-level token would otherwise be inherited by every ACP child. Only
-  // an explicit provider-instance environment value grants manager access.
+  // Host-level manager tokens would otherwise be inherited by every ACP child.
+  // Only an explicit provider-instance token grants manager access.
+  delete bound.SUBPOLAR_MANAGER_TOKEN;
   delete bound.SUBPOLAR_MANAGER_INSTANCE_TOKEN;
   delete bound.SUBPOLAR_OWNER_ID;
   if (!configuredInstanceToken?.trim()) return bound;
