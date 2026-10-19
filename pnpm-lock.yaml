@@ -2024,6 +2024,10 @@ importers:
       '@subpolar/shared':
         specifier: workspace:*
         version: link:../subpolar-contracts
+    devDependencies:
+      '@types/node':
+        specifier: 24.12.4
+        version: 24.12.4
 
   packages/subpolar-contracts: {}
 
