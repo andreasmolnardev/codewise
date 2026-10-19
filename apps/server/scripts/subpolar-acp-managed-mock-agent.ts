@@ -13,10 +13,13 @@ import type {
   EnvironmentManager,
   EnvironmentRequest,
 } from "@subpolar/environments";
-import { makeInMemoryStdio } from "../../packages/effect-acp/src/_internal/stdio.ts";
-import { createWorkerExecutionOptions } from "../../packages/subpolar-acp/src/workerExecution.ts";
-import { layerManagedStdio } from "../../packages/subpolar-acp/src/managedProxy.ts";
-import { layer as layerSubpolarAgent, layerStdio } from "../../packages/subpolar-acp/src/index.ts";
+import { makeInMemoryStdio } from "../../../packages/effect-acp/src/_internal/stdio.ts";
+import { createWorkerExecutionOptions } from "../../../packages/subpolar-acp/src/workerExecution.ts";
+import { layerManagedStdio } from "../../../packages/subpolar-acp/src/managedProxy.ts";
+import {
+  layer as layerSubpolarAgent,
+  layerStdio,
+} from "../../../packages/subpolar-acp/src/index.ts";
 
 type OutputChunk = { readonly data: Uint8Array } | null;
 
@@ -78,10 +81,14 @@ const manager = {
     });
     const worker = layerSubpolarAgent(stdio, {
       ...workerOptions,
+      workerMode: true,
       executeTool: async (call, _definition, context) => {
         (report.executions as unknown[]).push({ call, cwd: context.cwd });
         await saveReport();
-        return { ok: true, value: { exitCode: 0, stdout: `cwd=${context.cwd}`, stderr: "", cancelled: false } };
+        return {
+          ok: true,
+          value: { exitCode: 0, stdout: `cwd=${context.cwd}`, stderr: "", cancelled: false },
+        };
       },
       executorFactory: async () => ({
         async execute(execution) {
@@ -90,12 +97,17 @@ const manager = {
             toolId: "internal/worker/execute",
             input: { command: ["pwd"] },
           });
-          await execution.emit({ type: "text", data: { text: `mock Pi answered; tool result: ${JSON.stringify(toolResult)}` } });
+          await execution.emit({
+            type: "text",
+            data: { text: `mock Pi answered; tool result: ${JSON.stringify(toolResult)}` },
+          });
           return `mock Pi answered; tool result: ${JSON.stringify(toolResult)}`;
         },
       }),
     });
-    await Effect.runPromise(Layer.buildWithScope(worker, scope));
+    await Effect.runPromise(
+      Effect.forkIn(Layer.launch(Layer.provide(worker, NodeServices.layer)), scope),
+    );
     const pumpDone = (async () => {
       try {
         while (true) {

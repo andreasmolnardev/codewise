@@ -14270,7 +14270,9 @@ describe("acpPostSettleMonitorPromptShouldSuppress", () => {
 
 it.live("drives a managed mock Pi tool approval through T3's generic ACP adapter", () =>
   Effect.gen(function* () {
-    const reportDirectory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-subpolar-acp-e2e-"));
+    const reportDirectory = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-subpolar-acp-e2e-"),
+    );
     const reportPath = NodePath.join(reportDirectory, "managed-session.json");
     const adapterRun = Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
@@ -14286,14 +14288,16 @@ it.live("drives a managed mock Pi tool approval through T3's generic ACP adapter
               ...runtimeInput,
               spawn: {
                 command: process.execPath,
-                args: [agentPath],
+                args: ["--experimental-transform-types", agentPath],
                 cwd: runtimeInput.cwd,
                 env: {
                   ...process.env,
                   SUBPOLAR_ACP_EXECUTION: "managed",
                   SUBPOLAR_MANAGER_URL: "http://subpolar-manager:8787",
-                  SUBPOLAR_MANAGER_TOKEN: "composite-test-manager-token-with-more-than-thirty-two-characters",
+                  SUBPOLAR_MANAGER_TOKEN:
+                    "composite-test-manager-token-with-more-than-thirty-two-characters",
                   SUBPOLAR_STORAGE_ROOT: "/workspaces",
+                  SUBPOLAR_OWNER_ID: "owner-acp-subpolar-mock-pi-e2e",
                   SUBPOLAR_ACP_WORKER_COMMAND: '["/mock/subpolar-acp-worker"]',
                   SUBPOLAR_TEST_REPORT_FILE: reportPath,
                 },
@@ -14337,22 +14341,16 @@ it.live("drives a managed mock Pi tool approval through T3's generic ACP adapter
         modelSelection,
         runtimePolicy,
       });
-      yield* runtime.startTurn(makeTurnInput({
-        threadId,
-        providerThread,
-        instanceId,
-        runtimePolicy,
-        now: yield* DateTime.now,
-        messageText: "run the managed mock Pi flow",
-      }));
-
       const runtimeRequests: Array<OrchestrationV2RuntimeRequest> = [];
       const assistantMessages: string[] = [];
       let terminalStatus: string | undefined;
-      yield* runtime.events.pipe(
+      const eventFiber = yield* runtime.events.pipe(
         Stream.takeUntil((event) => event.type === "turn.terminal"),
         Stream.runForEach((event) => {
-          if (event.type === "runtime_request.updated" && event.runtimeRequest.status === "pending") {
+          if (
+            event.type === "runtime_request.updated" &&
+            event.runtimeRequest.status === "pending"
+          ) {
             runtimeRequests.push(event.runtimeRequest);
             return runtime.respondToRuntimeRequest({
               requestId: event.runtimeRequest.id,
@@ -14365,10 +14363,25 @@ it.live("drives a managed mock Pi tool approval through T3's generic ACP adapter
           if (event.type === "turn.terminal") terminalStatus = event.status;
           return Effect.void;
         }),
+        Effect.forkScoped,
       );
+      const startTurn = yield* runtime
+        .startTurn(
+          makeTurnInput({
+            threadId,
+            providerThread,
+            instanceId,
+            runtimePolicy,
+            now: yield* DateTime.now,
+            messageText: "run the managed mock Pi flow",
+          }),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Fiber.join(eventFiber);
+      yield* Fiber.join(startTurn);
 
       assert.equal(runtimeRequests.length, 1);
-      assert.equal(runtimeRequests[0]?.kind, "permission");
+      assert.equal(runtimeRequests[0]?.kind, "command");
       assert.equal(runtimeRequests[0]?.status, "pending");
       assert.equal(terminalStatus, "completed");
       assert.isTrue(assistantMessages.some((text) => text.includes("mock Pi answered")));
@@ -14377,7 +14390,11 @@ it.live("drives a managed mock Pi tool approval through T3's generic ACP adapter
 
     yield* adapterRun;
     const report = JSON.parse(NodeFS.readFileSync(reportPath, "utf8")) as {
-      starts: Array<{ target: { worktreePath: string }; command: string[]; process: { cwd?: string; environment?: Record<string, string> } }>;
+      starts: Array<{
+        target: { worktreePath: string };
+        command: string[];
+        process: { cwd?: string; environment?: Record<string, string> };
+      }>;
       executions: Array<{ cwd: string; call: { input: { command: string[] } } }>;
       terminations: string[];
     };
