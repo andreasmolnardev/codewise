@@ -2486,41 +2486,61 @@ it.layer(
     }),
   );
 
-  it.effect("routes only allowlisted provider instances to the managed terminal and hides its pid", () =>
-    Effect.gen(function* () {
-      const providerInstanceId = ProviderInstanceId.make("codex_managed");
-      const managedProcess = new FakePtyProcess(-1);
-      const managedCalls: Array<{ shell: string; cwd: string }> = [];
-      const { manager, ptyAdapter } = yield* createManager(5, {
-        managedProviderInstanceIds: new Set([providerInstanceId]),
-        managedPtySpawn: (input) => {
-          managedCalls.push({ shell: input.shell, cwd: input.cwd });
-          return Effect.succeed(managedProcess);
-        },
-        resolveProviderInstanceEnvironment: (_requestedId, env) => Effect.succeed(env ?? {}),
-      });
+  it.effect(
+    "routes only allowlisted provider instances to the managed terminal and hides its pid",
+    () =>
+      Effect.gen(function* () {
+        const providerInstanceId = ProviderInstanceId.make("codex_managed");
+        const managedProcess = new FakePtyProcess(-1);
+        const managedCalls: Array<{
+          shell: string;
+          cwd: string;
+          terminalId: string;
+          env: NodeJS.ProcessEnv;
+        }> = [];
+        const { manager, ptyAdapter } = yield* createManager(5, {
+          managedProviderInstanceIds: new Set([providerInstanceId]),
+          managedPtySpawn: (input) => {
+            managedCalls.push({
+              shell: input.shell,
+              cwd: input.cwd,
+              terminalId: input.terminalId,
+              env: input.env,
+            });
+            return Effect.succeed(managedProcess);
+          },
+          resolveProviderInstanceEnvironment: (_requestedId, env) => Effect.succeed(env ?? {}),
+        });
 
-      const managed = yield* manager.open(
-        openInput({
-          providerInstanceId,
-          worktreePath: process.cwd(),
+        const managed = yield* manager.open(
+          openInput({
+            providerInstanceId,
+            terminalId: "setup-configure",
+            worktreePath: process.cwd(),
+            cwd: process.cwd(),
+            env: { T3CODE_WORKTREE_PATH: process.cwd(), COLORTERM: "" },
+          }),
+        );
+        expect(managedCalls).toHaveLength(1);
+        expect(managedCalls[0]).toMatchObject({
+          shell: "/bin/bash",
           cwd: process.cwd(),
-        }),
-      );
-      expect(managedCalls).toEqual([{ shell: "/bin/bash", cwd: process.cwd() }]);
-      expect(managed.pid).toBeNull();
-      expect(ptyAdapter.spawnInputs).toHaveLength(0);
+          terminalId: "setup-configure",
+          env: { T3CODE_WORKTREE_PATH: process.cwd(), COLORTERM: "" },
+        });
+        expect(managed.pid).toBeNull();
+        expect(ptyAdapter.spawnInputs).toHaveLength(0);
 
-      const local = yield* manager.open(
-        openInput({
-          threadId: "thread-local",
-          providerInstanceId: ProviderInstanceId.make("codex_local"),
-        }),
-      );
-      expect(local.pid).toBe(9000);
-      expect(managedCalls).toHaveLength(1);
-      expect(ptyAdapter.spawnInputs).toHaveLength(1);
-    }),
+        const local = yield* manager.open(
+          openInput({
+            threadId: "thread-local",
+            providerInstanceId: ProviderInstanceId.make("codex_local"),
+          }),
+        );
+        expect(local.pid).toBe(9000);
+        expect(managedCalls).toHaveLength(1);
+        expect(ptyAdapter.spawnInputs).toHaveLength(1);
+      }),
   );
 
   it.effect("fails closed for an allowlisted provider when Subpolar is not configured", () =>

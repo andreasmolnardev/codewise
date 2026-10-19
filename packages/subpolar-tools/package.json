@@ -2,13 +2,11 @@
   "name": "@subpolar/tools",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
-  "devDependencies": {
-    "@types/node": "catalog:"
-  },
+  "license": "MIT",
   "bin": {
     "subpolar-tools": "./src/cli.ts"
   },
+  "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./cli": "./src/cli.ts"
@@ -17,5 +15,8 @@
     "start": "bun ./src/cli.ts",
     "typecheck": "tsc-rs --noEmit",
     "test": "bun test test"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
   }
 }

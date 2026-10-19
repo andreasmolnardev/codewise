@@ -1,13 +1,24 @@
 import { expect, test } from "bun:test";
+import { createServer } from "node:net";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createDockerEngineClient } from "../src/docker-engine.ts";
-import type { DockerContainerCreateOptions, DockerContainerProcessRequest, DockerImageBuildRequest } from "../src/docker.ts";
+import type {
+  DockerContainerCreateOptions,
+  DockerContainerProcessRequest,
+  DockerImageBuildRequest,
+} from "../src/docker.ts";
 
 function engineFixture(
-  handler: (request: { method: string; url: string; body: string }) => { status: number; body?: unknown },
-  processRunner?: (containerId: string, request: DockerContainerProcessRequest) => Promise<{ processId?: string; exitCode: number | null; cancelled: boolean }>,
+  handler: (request: { method: string; url: string; body: string }) => {
+    status: number;
+    body?: unknown;
+  },
+  processRunner?: (
+    containerId: string,
+    request: DockerContainerProcessRequest,
+  ) => Promise<{ processId?: string; exitCode: number | null; cancelled: boolean }>,
 ) {
   return createDockerEngineClient({
     socketPath: "/var/run/docker.sock",
@@ -20,7 +31,8 @@ function engineFixture(
       });
       return {
         statusCode: result.status,
-        body: result.body === undefined ? new Uint8Array() : Buffer.from(JSON.stringify(result.body)),
+        body:
+          result.body === undefined ? new Uint8Array() : Buffer.from(JSON.stringify(result.body)),
       };
     },
   });
@@ -41,7 +53,12 @@ const createOptions: DockerContainerCreateOptions = {
   pidsLimit: 100,
   mounts: [
     { type: "bind", source: "/host/worktree", target: "/workspaces/repo", readOnly: false },
-    { type: "volume", source: "subpolar-env_123-data", target: "/var/lib/subpolar", readOnly: false },
+    {
+      type: "volume",
+      source: "subpolar-env_123-data",
+      target: "/var/lib/subpolar",
+      readOnly: false,
+    },
   ],
   tmpfs: { "/tmp": "rw,nosuid,nodev,size=64m" },
   environment: { HOME: "/tmp/home", SUBPOLAR_RUNTIME_DATA_DIR: "/var/lib/subpolar" },
@@ -51,22 +68,44 @@ test("maps safe lifecycle operations to the Docker Engine API", async () => {
   const requests: Array<{ method: string; url: string; body: string }> = [];
   const client = engineFixture((request) => {
     requests.push(request);
-    if (request.method === "GET") return { status: 200, body: {
-      Id: "container-1",
-      Name: "/subpolar-env_123",
-      State: { Status: "running" },
-      Config: { Image: "worker@sha256:abc", User: "1000:1000", Labels: { "io.subpolar.environment-id": "env_123" }, Env: ["HOME=/tmp/home"] },
-      HostConfig: {
-        Privileged: false, ReadonlyRootfs: true, NetworkMode: "none", CapDrop: ["ALL"],
-        SecurityOpt: ["no-new-privileges:true"], Memory: 512 * 1024 * 1024, NanoCpus: 500_000_000,
-        PidsLimit: 100, Tmpfs: { "/tmp": "rw,nosuid,nodev,size=64m" },
-      },
-      Mounts: [
-        { Type: "bind", Source: "/host/worktree", Destination: "/workspaces/repo", RW: true },
-        { Type: "volume", Name: "subpolar-env_123-data", Source: "/var/lib/docker/volumes/subpolar-env_123-data/_data", Destination: "/var/lib/subpolar", RW: true },
-      ],
-    } };
-    if (request.url?.includes("/containers/create")) return { status: 201, body: { Id: "container-1" } };
+    if (request.method === "GET")
+      return {
+        status: 200,
+        body: {
+          Id: "container-1",
+          Name: "/subpolar-env_123",
+          State: { Status: "running" },
+          Config: {
+            Image: "worker@sha256:abc",
+            User: "1000:1000",
+            Labels: { "io.subpolar.environment-id": "env_123" },
+            Env: ["HOME=/tmp/home"],
+          },
+          HostConfig: {
+            Privileged: false,
+            ReadonlyRootfs: true,
+            NetworkMode: "none",
+            CapDrop: ["ALL"],
+            SecurityOpt: ["no-new-privileges:true"],
+            Memory: 512 * 1024 * 1024,
+            NanoCpus: 500_000_000,
+            PidsLimit: 100,
+            Tmpfs: { "/tmp": "rw,nosuid,nodev,size=64m" },
+          },
+          Mounts: [
+            { Type: "bind", Source: "/host/worktree", Destination: "/workspaces/repo", RW: true },
+            {
+              Type: "volume",
+              Name: "subpolar-env_123-data",
+              Source: "/var/lib/docker/volumes/subpolar-env_123-data/_data",
+              Destination: "/var/lib/subpolar",
+              RW: true,
+            },
+          ],
+        },
+      };
+    if (request.url?.includes("/containers/create"))
+      return { status: 201, body: { Id: "container-1" } };
     return { status: 204 };
   });
 
@@ -75,10 +114,19 @@ test("maps safe lifecycle operations to the Docker Engine API", async () => {
     id: "container-1",
     name: "subpolar-env_123",
     state: "running",
-    config: { image: createOptions.image, networkMode: "none", mounts: [
-      { type: "bind", source: "/host/worktree", target: "/workspaces/repo", readOnly: false },
-      { type: "volume", source: "subpolar-env_123-data", target: "/var/lib/subpolar", readOnly: false },
-    ] },
+    config: {
+      image: createOptions.image,
+      networkMode: "none",
+      mounts: [
+        { type: "bind", source: "/host/worktree", target: "/workspaces/repo", readOnly: false },
+        {
+          type: "volume",
+          source: "subpolar-env_123-data",
+          target: "/var/lib/subpolar",
+          readOnly: false,
+        },
+      ],
+    },
   });
   await expect(client.createContainer(createOptions)).resolves.toEqual({ id: "container-1" });
   await client.startContainer("container-1");
@@ -101,7 +149,12 @@ test("maps safe lifecycle operations to the Docker Engine API", async () => {
     PidsLimit: 100,
     Mounts: [
       { Type: "bind", Source: "/host/worktree", Target: "/workspaces/repo", ReadOnly: false },
-      { Type: "volume", Source: "subpolar-env_123-data", Target: "/var/lib/subpolar", ReadOnly: false },
+      {
+        Type: "volume",
+        Source: "subpolar-env_123-data",
+        Target: "/var/lib/subpolar",
+        ReadOnly: false,
+      },
     ],
   });
 });
@@ -111,12 +164,20 @@ test("creates an internal Compose network and assigns service DNS aliases", asyn
   const client = engineFixture((request) => {
     requests.push(request);
     if (request.url === "/v1.44/networks/create") return { status: 201, body: { Id: "network-1" } };
-    if (request.url === "/v1.44/networks/network-1") return { status: 200, body: {
-      Id: "network-1", Name: "subpolar-net-test", Driver: "bridge", Internal: true,
-      Labels: { "io.subpolar.resource-purpose": "compose-network" },
-      Containers: { "container-db": { Aliases: ["db"] } },
-    } };
-    if (request.url === "/v1.44/containers/create?name=worker") return { status: 201, body: { Id: "worker-1" } };
+    if (request.url === "/v1.44/networks/network-1")
+      return {
+        status: 200,
+        body: {
+          Id: "network-1",
+          Name: "subpolar-net-test",
+          Driver: "bridge",
+          Internal: true,
+          Labels: { "io.subpolar.resource-purpose": "compose-network" },
+          Containers: { "container-db": { Aliases: ["db"] } },
+        },
+      };
+    if (request.url === "/v1.44/containers/create?name=worker")
+      return { status: 201, body: { Id: "worker-1" } };
     return { status: 204 };
   });
   const network = await client.createNetwork!({
@@ -125,17 +186,35 @@ test("creates an internal Compose network and assigns service DNS aliases", asyn
     internal: true,
     labels: { "io.subpolar.resource-purpose": "compose-network" },
   });
-  expect(network).toMatchObject({ name: "subpolar-net-test", internal: true, containerAliases: { "container-db": ["db"] } });
+  expect(network).toMatchObject({
+    name: "subpolar-net-test",
+    internal: true,
+    containerAliases: { "container-db": ["db"] },
+  });
   await client.createContainer({
     ...createOptions,
     name: "worker",
     networkMode: network.name,
     networkAliases: ["app"],
-    healthcheck: { test: ["CMD", "pg_isready"], intervalMs: 1000, timeoutMs: 3000, retries: 60, startPeriodMs: 1000 },
+    healthcheck: {
+      test: ["CMD", "pg_isready"],
+      intervalMs: 1000,
+      timeoutMs: 3000,
+      retries: 60,
+      startPeriodMs: 1000,
+    },
   });
-  const body = JSON.parse(requests.find((request) => request.url.includes("/containers/create"))!.body);
+  const body = JSON.parse(
+    requests.find((request) => request.url.includes("/containers/create"))!.body,
+  );
   expect(body.HostConfig.NetworkMode).toBe("subpolar-net-test");
-  expect(body.Healthcheck).toEqual({ Test: ["CMD", "pg_isready"], Interval: 1_000_000_000, Timeout: 3_000_000_000, Retries: 60, StartPeriod: 1_000_000_000 });
+  expect(body.Healthcheck).toEqual({
+    Test: ["CMD", "pg_isready"],
+    Interval: 1_000_000_000,
+    Timeout: 3_000_000_000,
+    Retries: 60,
+    StartPeriod: 1_000_000_000,
+  });
   expect(body.NetworkingConfig.EndpointsConfig["subpolar-net-test"].Aliases).toEqual(["app"]);
 });
 
@@ -154,12 +233,20 @@ test("manages named runtime data volumes through the Docker Engine API", async (
   });
 
   await expect(client.inspectVolume("subpolar-env_123-data")).resolves.toEqual({
-    name: "subpolar-env_123-data", driver: "local", labels: { "io.subpolar.environment-id": "env_123" },
+    name: "subpolar-env_123-data",
+    driver: "local",
+    labels: { "io.subpolar.environment-id": "env_123" },
   });
-  await expect(client.createVolume({
-    name: "subpolar-env_123-data", driver: "local", labels: { "io.subpolar.environment-id": "env_123" },
-  })).resolves.toEqual({
-    name: "subpolar-env_123-data", driver: "local", labels: { "io.subpolar.environment-id": "env_123" },
+  await expect(
+    client.createVolume({
+      name: "subpolar-env_123-data",
+      driver: "local",
+      labels: { "io.subpolar.environment-id": "env_123" },
+    }),
+  ).resolves.toEqual({
+    name: "subpolar-env_123-data",
+    driver: "local",
+    labels: { "io.subpolar.environment-id": "env_123" },
   });
   await client.removeVolume("subpolar-env_123-data");
 
@@ -169,7 +256,9 @@ test("manages named runtime data volumes through the Docker Engine API", async (
     ["DELETE", "/v1.44/volumes/subpolar-env_123-data"],
   ]);
   expect(JSON.parse(requests[1]!.body)).toEqual({
-    Name: "subpolar-env_123-data", Driver: "local", Labels: { "io.subpolar.environment-id": "env_123" },
+    Name: "subpolar-env_123-data",
+    Driver: "local",
+    Labels: { "io.subpolar.environment-id": "env_123" },
   });
 });
 
@@ -198,7 +287,8 @@ test("routes container process requests through the worker runner", async () => 
     worktreeDirectory: "/workspaces/repo",
     workingDirectory: "/workspaces/repo/packages",
     environment: { MODE: "test" },
-    onOutput: ({ stream, data }: { stream: string; data: Uint8Array }) => output.push(`${stream}:${new TextDecoder().decode(data)}`),
+    onOutput: ({ stream, data }: { stream: string; data: Uint8Array }) =>
+      output.push(`${stream}:${new TextDecoder().decode(data)}`),
   };
 
   await expect(client.executeContainer!("container-9", request)).resolves.toEqual({
@@ -215,7 +305,9 @@ test("routes Dev Container image builds through the injected manager runner", as
   const client = createDockerEngineClient({
     socketPath: "/var/run/docker.sock",
     transport: async () => ({ statusCode: 200, body: new Uint8Array() }),
-    imageBuildRunner: async (request) => { seen.push(request); },
+    imageBuildRunner: async (request) => {
+      seen.push(request);
+    },
   });
   const request: DockerImageBuildRequest = {
     kind: "dockerfile",
@@ -234,7 +326,10 @@ test("invokes the Dev Container CLI with a frozen feature lock", async () => {
   const outputPath = path.join(directory, "args.json");
   const binaryPath = path.join(directory, "devcontainer");
   try {
-    const source = "#!/usr/bin/env node\nrequire('node:fs').writeFileSync(" + JSON.stringify(outputPath) + ", JSON.stringify(process.argv.slice(2)));\n";
+    const source =
+      "#!/usr/bin/env node\nrequire('node:fs').writeFileSync(" +
+      JSON.stringify(outputPath) +
+      ", JSON.stringify(process.argv.slice(2)));\n";
     await writeFile(binaryPath, source);
     await chmod(binaryPath, 0o755);
     const client = createDockerEngineClient({
@@ -252,9 +347,12 @@ test("invokes the Dev Container CLI with a frozen feature lock", async () => {
 
     expect(JSON.parse(await readFile(outputPath, "utf8"))).toEqual([
       "build",
-      "--workspace-folder", "/host/worktree",
-      "--config", "/host/worktree/.devcontainer/devcontainer.json",
-      "--image-name", "subpolar-devcontainer:0123456789abcdef0123456789abcdef",
+      "--workspace-folder",
+      "/host/worktree",
+      "--config",
+      "/host/worktree/.devcontainer/devcontainer.json",
+      "--image-name",
+      "subpolar-devcontainer:0123456789abcdef0123456789abcdef",
       "--frozen-lockfile",
     ]);
   } finally {
@@ -271,23 +369,39 @@ test("routes interactive sessions through the TTY runner and Docker resize API",
     transport: async (request) => {
       requests.push(`${request.method} ${request.path}`);
       return {
-        statusCode: request.path.endsWith("/exec") ? 201 : request.path.endsWith("/start") ? 200 : 200,
-        body: request.path.endsWith("/exec") ? Buffer.from('{"Id":"cleanup-exec"}') : new Uint8Array(),
+        statusCode: request.path.endsWith("/exec")
+          ? 201
+          : request.path.endsWith("/start")
+            ? 200
+            : 200,
+        body: request.path.endsWith("/exec")
+          ? Buffer.from('{"Id":"cleanup-exec"}')
+          : new Uint8Array(),
       };
     },
     interactiveRunner: async (id, request, resize, terminate) => {
       seen = { id, request };
       cleanup = () => terminate(id, request.controlToken!);
       return {
-        output: { async *[Symbol.asyncIterator]() { yield Buffer.from("prompt"); } },
+        output: {
+          async *[Symbol.asyncIterator]() {
+            yield Buffer.from("prompt");
+          },
+        },
         result: Promise.resolve({ exitCode: null, cancelled: false }),
         async write() {},
         resize: (columns, rows) => resize("exec-tty", columns, rows),
-        async terminate() { await cleanup?.(); },
+        async terminate() {
+          await cleanup?.();
+        },
       };
     },
   });
-  const processRequest = { command: ["/bin/sh"], worktreeDirectory: "/workspaces/repo", workingDirectory: "/workspaces/repo" };
+  const processRequest = {
+    command: ["/bin/sh"],
+    worktreeDirectory: "/workspaces/repo",
+    workingDirectory: "/workspaces/repo",
+  };
   const session = await client.startInteractiveContainer!("container-tty", processRequest);
   await session.resize(120, 40);
   const output = [];
@@ -295,8 +409,15 @@ test("routes interactive sessions through the TTY runner and Docker resize API",
   await session.terminate();
 
   expect(seen?.id).toBe("container-tty");
-  const supervised = seen?.request as { command: string[]; workingDirectory: string; controlToken: string };
-  expect(supervised.command.slice(0, 2)).toEqual(["node", "/usr/local/lib/subpolar/terminal-supervisor.mjs"]);
+  const supervised = seen?.request as {
+    command: string[];
+    workingDirectory: string;
+    controlToken: string;
+  };
+  expect(supervised.command.slice(0, 2)).toEqual([
+    "node",
+    "/usr/local/lib/subpolar/terminal-supervisor.mjs",
+  ]);
   expect(supervised.command[2]).toMatch(/^[a-f0-9-]{36}$/);
   expect(supervised.controlToken).toBe(supervised.command[2]);
   expect(supervised.workingDirectory).toBe(processRequest.worktreeDirectory);
@@ -308,6 +429,83 @@ test("routes interactive sessions through the TTY runner and Docker resize API",
     "POST /v1.44/exec/cleanup-exec/start",
   ]);
   expect(output).toEqual([Buffer.from("prompt")]);
+});
+
+test("attaches a TTY over the Docker Engine HTTP 101 upgrade", async () => {
+  const socketPath = `/tmp/subpolar-docker-engine-${crypto.randomUUID()}.sock`;
+  let upgradedRequest: { method: string; url: string; upgrade: string | undefined } | undefined;
+  const server = createServer((socket) => {
+    let pending = Buffer.alloc(0);
+    const onData = (chunk: Buffer) => {
+      pending = Buffer.concat([pending, chunk]);
+      const boundary = pending.indexOf("\r\n\r\n");
+      if (boundary < 0) return;
+      const header = pending.subarray(0, boundary).toString("latin1");
+      const [requestLine, ...headers] = header.split("\r\n");
+      const [method, url] = requestLine?.split(" ") ?? [];
+      const contentLength = Number(
+        headers
+          .find((line) => /^content-length:/i.test(line))
+          ?.split(":")[1]
+          ?.trim() ?? 0,
+      );
+      const bodyStart = boundary + 4;
+      if (pending.byteLength < bodyStart + contentLength) return;
+      socket.off("data", onData);
+      if (method === "POST" && url === "/v1.44/containers/container-tty/exec") {
+        const body = JSON.stringify({ Id: "exec-tty" });
+        socket.end(
+          `HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+        );
+      } else if (method === "POST" && url === "/v1.44/exec/exec-tty/start") {
+        upgradedRequest = {
+          method: method ?? "",
+          url: url ?? "",
+          upgrade: headers
+            .find((line) => /^upgrade:/i.test(line))
+            ?.split(":")[1]
+            ?.trim()
+            .toLowerCase(),
+        };
+        socket.end("HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nprompt");
+      } else if (method === "GET" && url === "/v1.44/exec/exec-tty/json") {
+        const body = JSON.stringify({ ExitCode: 7 });
+        socket.end(
+          `HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+        );
+      } else {
+        socket.end("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n");
+      }
+    };
+    socket.on("data", onData);
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  try {
+    const client = createDockerEngineClient({ socketPath });
+    const session = await client.startInteractiveContainer!("container-tty", {
+      command: ["/bin/sh"],
+      worktreeDirectory: "/workspaces/repo",
+      workingDirectory: "/workspaces/repo",
+    });
+    const output: Buffer[] = [];
+    for await (const chunk of session.output) output.push(Buffer.from(chunk));
+
+    expect(upgradedRequest).toEqual({
+      method: "POST",
+      url: "/v1.44/exec/exec-tty/start",
+      upgrade: "tcp",
+    });
+    expect(output).toEqual([Buffer.from("prompt")]);
+    await expect(session.result).resolves.toEqual({ exitCode: 7, cancelled: false });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+    await rm(socketPath, { force: true });
+  }
 });
 
 test("launches non-TTY process sessions with JSON-safe argv and bidirectional stdio", async () => {
@@ -325,13 +523,19 @@ test("launches non-TTY process sessions with JSON-safe argv and bidirectional st
     managedSessionRunner: async (id, request, terminate) => {
       seen = { id, request };
       return {
-        async write(data) { writes.push(data); },
-        output: { async *[Symbol.asyncIterator]() {
-          yield { stream: "stdout" as const, data: Buffer.from("jsonrpc") };
-          yield { stream: "stderr" as const, data: Buffer.from("diagnostic") };
-        } },
+        async write(data) {
+          writes.push(data);
+        },
+        output: {
+          async *[Symbol.asyncIterator]() {
+            yield { stream: "stdout" as const, data: Buffer.from("jsonrpc") };
+            yield { stream: "stderr" as const, data: Buffer.from("diagnostic") };
+          },
+        },
         result: Promise.resolve({ exitCode: 0, cancelled: false }),
-        async terminate() { await terminate(id, request.controlToken!); },
+        async terminate() {
+          await terminate(id, request.controlToken!);
+        },
       };
     },
   });
@@ -348,8 +552,16 @@ test("launches non-TTY process sessions with JSON-safe argv and bidirectional st
   await session.terminate();
 
   expect(seen?.id).toBe("container-stdio");
-  const supervised = seen?.request as { command: string[]; workingDirectory: string; controlToken: string };
-  expect(supervised.command.slice(0, 3)).toEqual(["node", "/usr/local/lib/subpolar/terminal-supervisor.mjs", "--stdio"]);
+  const supervised = seen?.request as {
+    command: string[];
+    workingDirectory: string;
+    controlToken: string;
+  };
+  expect(supervised.command.slice(0, 3)).toEqual([
+    "node",
+    "/usr/local/lib/subpolar/terminal-supervisor.mjs",
+    "--stdio",
+  ]);
   expect(supervised.command[3]).toMatch(/^[a-f0-9-]{36}$/);
   expect(supervised.controlToken).toBe(supervised.command[3]);
   const payload = JSON.parse(Buffer.from(supervised.command[4]!, "base64url").toString("utf8"));
@@ -368,14 +580,17 @@ test("launches non-TTY process sessions with JSON-safe argv and bidirectional st
 test("closes Docker exec stdin after the worker reports command completion", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-docker-worker-exit-"));
   const dockerStub = path.join(root, "docker-stub.sh");
-  await writeFile(dockerStub, [
-    "#!/bin/sh",
-    "IFS= read -r request",
-    "printf '%s\\n' '{\"type\":\"started\",\"processId\":\"child-1\"}'",
-    "printf '%s\\n' '{\"type\":\"exit\",\"exitCode\":7}'",
-    "cat >/dev/null",
-    "",
-  ].join("\n"));
+  await writeFile(
+    dockerStub,
+    [
+      "#!/bin/sh",
+      "IFS= read -r request",
+      'printf \'%s\\n\' \'{"type":"started","processId":"child-1"}\'',
+      'printf \'%s\\n\' \'{"type":"exit","exitCode":7}\'',
+      "cat >/dev/null",
+      "",
+    ].join("\n"),
+  );
   await chmod(dockerStub, 0o755);
   try {
     const client = createDockerEngineClient({

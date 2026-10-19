@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { createEnvironmentManager, type EnvironmentBackend, type EnvironmentIdentity, type ManagedEnvironment } from "../src/index.ts";
+import {
+  createEnvironmentManager,
+  type EnvironmentBackend,
+  type EnvironmentIdentity,
+  type ManagedEnvironment,
+} from "../src/index.ts";
 import { createFileEnvironmentRegistrationStore } from "../src/persistence.ts";
 
 const roots: string[] = [];
@@ -23,7 +28,12 @@ class Backend implements EnvironmentBackend {
 
   async create(identity: EnvironmentIdentity) {
     this.creates += 1;
-    const record = { ...identity, backendId: this.id, resourceId: `resource-${identity.id}`, status: "stopped" as const };
+    const record = {
+      ...identity,
+      backendId: this.id,
+      resourceId: `resource-${identity.id}`,
+      status: "stopped" as const,
+    };
     this.records.set(record.id, record);
     return record;
   }
@@ -50,16 +60,28 @@ test("persists lifecycle records and reconciles them after manager restart", asy
   roots.push(root);
   const worktree = path.join(root, "workspace");
   await mkdir(worktree);
-  const request = { ownerId: "owner", workspaceId: "workspace", storageRoot: root, worktreePath: worktree };
+  const request = {
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: worktree,
+  };
   const file = path.join(root, "state", "environments.json");
   const backend = new Backend();
-  const firstManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file), () => new Date("2026-10-16T00:00:00.000Z"));
+  const firstManager = createEnvironmentManager(
+    backend,
+    createFileEnvironmentRegistrationStore(file),
+    () => new Date("2026-10-16T00:00:00.000Z"),
+  );
   const created = await firstManager.ensure(request);
   const raw = await readFile(file, "utf8");
   expect(raw).toContain(created.id);
   expect(raw).not.toContain("token");
 
-  const restartedManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const restartedManager = createEnvironmentManager(
+    backend,
+    createFileEnvironmentRegistrationStore(file),
+  );
   const [result] = await restartedManager.reconcile();
   expect(result).toMatchObject({ environmentId: created.id, environment: { status: "ready" } });
   expect(backend.creates).toBe(1);
@@ -68,24 +90,86 @@ test("persists lifecycle records and reconciles them after manager restart", asy
   expect(await createFileEnvironmentRegistrationStore(file).loadAll()).toEqual([]);
 });
 
+test("serializes read-modify-write operations across independent store instances", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-registration-race-"));
+  roots.push(root);
+  const file = path.join(root, "state", "environments.json");
+  const stores = Array.from({ length: 4 }, () => createFileEnvironmentRegistrationStore(file));
+
+  await Promise.all(
+    Array.from({ length: 24 }, (_, index) => {
+      const id = `env-${index}`;
+      const environment: ManagedEnvironment = {
+        id,
+        ownerId: "owner",
+        workspaceId: `workspace-${index}`,
+        storageRoot: root,
+        worktreePath: path.join(root, `workspace-${index}`),
+        backendId: "fake",
+        resourceId: `resource-${index}`,
+        status: "stopped",
+      };
+      return stores[index % stores.length]!.save(environment, "created", "updated");
+    }),
+  );
+
+  const registrations = await stores[0]!.loadAll();
+  expect(registrations).toHaveLength(24);
+  expect(new Set(registrations.map(({ environment }) => environment.id)).size).toBe(24);
+});
+
+test("atomically replaces an empty lock directory left by a crashed writer", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-registration-empty-lock-"));
+  roots.push(root);
+  const file = path.join(root, "state", "environments.json");
+  await mkdir(path.dirname(file), { recursive: true });
+  await mkdir(file + ".lock");
+
+  const environment: ManagedEnvironment = {
+    id: "env-1",
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: path.join(root, "workspace"),
+    backendId: "fake",
+    resourceId: "resource-1",
+    status: "stopped",
+  };
+  await createFileEnvironmentRegistrationStore(file).save(environment, "created", "updated");
+
+  expect(await createFileEnvironmentRegistrationStore(file).loadAll()).toMatchObject([
+    { environment: { id: environment.id } },
+  ]);
+});
+
 test("reconciliation records stopped Docker state without starting the environment", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-stopped-reconcile-"));
   roots.push(root);
   const worktree = path.join(root, "workspace");
   await mkdir(worktree);
-  const request = { ownerId: "owner", workspaceId: "workspace", storageRoot: root, worktreePath: worktree };
+  const request = {
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: worktree,
+  };
   const file = path.join(root, "state", "environments.json");
   const backend = new Backend();
   const manager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
   const running = await manager.ensure(request);
   await backend.stop(running);
 
-  const restartedManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const restartedManager = createEnvironmentManager(
+    backend,
+    createFileEnvironmentRegistrationStore(file),
+  );
   const [result] = await restartedManager.reconcile();
 
   expect(result).toMatchObject({ environmentId: running.id, environment: { status: "stopped" } });
   expect(backend.creates).toBe(1);
-  expect((await createFileEnvironmentRegistrationStore(file).loadAll())[0]?.environment.status).toBe("stopped");
+  expect(
+    (await createFileEnvironmentRegistrationStore(file).loadAll())[0]?.environment.status,
+  ).toBe("stopped");
 });
 
 test("reconciliation reports a missing container and preserves its registration", async () => {
@@ -93,17 +177,28 @@ test("reconciliation reports a missing container and preserves its registration"
   roots.push(root);
   const worktree = path.join(root, "workspace");
   await mkdir(worktree);
-  const request = { ownerId: "owner", workspaceId: "workspace", storageRoot: root, worktreePath: worktree };
+  const request = {
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: worktree,
+  };
   const file = path.join(root, "state", "environments.json");
   const backend = new Backend();
   const manager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
   const created = await manager.ensure(request);
   backend.records.delete(created.id);
 
-  const restartedManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const restartedManager = createEnvironmentManager(
+    backend,
+    createFileEnvironmentRegistrationStore(file),
+  );
   const [result] = await restartedManager.reconcile();
 
-  expect(result).toMatchObject({ environmentId: created.id, error: { code: "ENVIRONMENT_NOT_FOUND" } });
+  expect(result).toMatchObject({
+    environmentId: created.id,
+    error: { code: "ENVIRONMENT_NOT_FOUND" },
+  });
   expect(backend.creates).toBe(1);
   expect(await createFileEnvironmentRegistrationStore(file).loadAll()).toHaveLength(1);
 });
@@ -113,20 +208,29 @@ test("reconciliation rejects a replacement Docker resource with the same environ
   roots.push(root);
   const worktree = path.join(root, "workspace");
   await mkdir(worktree);
-  const request = { ownerId: "owner", workspaceId: "workspace", storageRoot: root, worktreePath: worktree };
+  const request = {
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: worktree,
+  };
   const file = path.join(root, "state", "environments.json");
   const backend = new Backend();
   const manager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
   const registered = await manager.ensure(request);
   backend.records.set(registered.id, { ...registered, resourceId: "replacement-resource" });
 
-  const restartedManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const restartedManager = createEnvironmentManager(
+    backend,
+    createFileEnvironmentRegistrationStore(file),
+  );
   const [result] = await restartedManager.reconcile();
 
   expect(result).toMatchObject({
     environmentId: registered.id,
     error: { code: "OWNERSHIP_MISMATCH", message: expect.stringContaining("resource") },
   });
-  expect((await createFileEnvironmentRegistrationStore(file).loadAll())[0]?.environment.resourceId)
-    .toBe(registered.resourceId);
+  expect(
+    (await createFileEnvironmentRegistrationStore(file).loadAll())[0]?.environment.resourceId,
+  ).toBe(registered.resourceId);
 });

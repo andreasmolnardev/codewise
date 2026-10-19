@@ -1,0 +1,7 @@
+{
+  "dockerComposeFile": "compose.yaml",
+  "service": "app",
+  "runServices": ["app", "db"],
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/project,type=bind",
+  "workspaceFolder": "/workspaces/project"
+}

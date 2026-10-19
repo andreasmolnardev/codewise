@@ -1,0 +1,4 @@
+{
+  "image": "registry.example/setup-failure:1",
+  "postCreateCommand": "exit 23"
+}

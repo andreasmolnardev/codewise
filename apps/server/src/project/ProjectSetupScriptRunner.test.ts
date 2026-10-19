@@ -182,10 +182,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       threadId: "thread-1",
       terminalId: observedTerminalId,
     });
-  }).pipe(
-    Effect.provide(layer),
-    Effect.provideService(HostProcess.Environment, {}),
-  );
+  }).pipe(Effect.provide(layer), Effect.provideService(HostProcess.Environment, {}));
 });
 
 it.effect("routes setup terminals through the allowlisted managed provider instance", () => {
@@ -255,8 +252,18 @@ it.effect("routes setup terminals through the allowlisted managed provider insta
       worktreePath: "/repo-worktree",
       project: { ...project, scripts: project.scripts },
     });
-    assert.equal(open.mock.calls[0]?.[0].providerInstanceId, "subpolar_instance");
-    assert.equal(open.mock.calls[0]?.[0].cwd, "/repo-worktree");
+    const terminalInput = open.mock.calls[0]?.[0];
+    assert.equal(terminalInput?.providerInstanceId, "subpolar_instance");
+    assert.equal(terminalInput?.terminalId, "setup-setup");
+    assert.equal(terminalInput?.cwd, "/repo-worktree");
+    assert.equal(terminalInput?.worktreePath, "/repo-worktree");
+    assert.deepEqual(terminalInput?.env, {
+      T3CODE_PROJECT_ROOT: "/repo",
+      T3CODE_WORKTREE_PATH: "/repo-worktree",
+      COLORTERM: "",
+      NO_COLOR: "1",
+      FORCE_COLOR: "0",
+    });
   }).pipe(
     Effect.provide(managedLayer),
     Effect.provideService(HostProcess.Environment, {

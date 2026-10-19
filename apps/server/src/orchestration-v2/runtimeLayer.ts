@@ -259,7 +259,7 @@ const layerThreadManagementProvided = ThreadManagementService.layerWithLegacyImp
   ),
 );
 export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe(
-  Layer.provide(layerProjectService),
+  Layer.provide(Layer.merge(layerProjectService, ProviderSessionRuntime.layer)),
 );
 const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),

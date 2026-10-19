@@ -2,17 +2,12 @@
   "name": "@subpolar/environments",
   "version": "0.1.0",
   "private": true,
-  "type": "module",
+  "license": "MIT",
   "bin": {
     "subpolar": "./src/admin-cli.ts",
     "subpolar-manager": "./src/manager-cli.ts"
   },
-  "devDependencies": {
-    "@types/node": "catalog:"
-  },
-  "dependencies": {
-    "yaml": "^2.9.0"
-  },
+  "type": "module",
   "exports": {
     ".": "./src/index.ts",
     "./docker": "./src/docker.ts",
@@ -26,5 +21,11 @@
   "scripts": {
     "typecheck": "tsc-rs --noEmit",
     "test": "bun test test"
+  },
+  "dependencies": {
+    "yaml": "^2.9.0"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
   }
 }

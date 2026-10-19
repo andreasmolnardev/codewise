@@ -2,19 +2,20 @@
   "name": "@subpolar/runtime-pi",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
-  "dependencies": {
-    "@subpolar/shared": "workspace:*",
-    "@earendil-works/pi-coding-agent": "1.0.2"
-  },
-  "devDependencies": {
-    "@types/node": "catalog:"
-  },
   "scripts": {
     "typecheck": "tsc-rs --noEmit",
     "test": "bun test test"
+  },
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "1.0.2",
+    "@subpolar/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
   }
 }
