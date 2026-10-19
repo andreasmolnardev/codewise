@@ -41,7 +41,8 @@ function splitFlags(argv: readonly string[]): { args: string[]; json: boolean; o
   let ownerId: string | undefined;
   for (let index = 0; index < argv.length; index++) {
     const value = argv[index]!;
-    if (value === "--json") json = true;
+    if (value === "--help") args.push(value);
+    else if (value === "--json") json = true;
     else if (value === "--owner-id") {
       const next = argv[++index];
       if (!next?.trim()) throw new CliUsageError("--owner-id requires a value");

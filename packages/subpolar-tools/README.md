@@ -38,7 +38,15 @@ The CLI is available with:
 
 ```sh
 bun packages/subpolar-tools/src/cli.ts health --json
+bun packages/subpolar-tools/src/cli.ts list --json
+bun packages/subpolar-tools/src/cli.ts describe internal/default/read --json
+bun packages/subpolar-tools/src/cli.ts query read --json
 ```
+
+`list`, `describe`, and `query` inspect the authenticated tool catalog. The
+CLI also supports `health`, `call`, `add`, `approvals`, and `events`; see the
+command options in `src/cli.ts`. It does not enumerate agent profiles because
+those are supplied by the host application.
 
 ## Testing
 

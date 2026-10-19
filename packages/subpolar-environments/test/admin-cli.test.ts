@@ -23,6 +23,48 @@ function capture() {
   };
 }
 
+test("status reports the authenticated manager count without exposing credentials", async () => {
+  const calls: Array<{ url: string; authorization: string | null; body: unknown }> = [];
+  const output = capture();
+  expect(
+    await runAdminCli(["status", "--json"], {
+      environment: baseEnvironment,
+      fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+        calls.push({
+          url: String(input),
+          authorization: new Headers(init?.headers).get("authorization"),
+          body: init?.body ? JSON.parse(String(init.body)) : undefined,
+        });
+        return Response.json({ ok: true, registeredEnvironmentCount: 2 });
+      }) as typeof fetch,
+      io: output.io,
+    }),
+  ).toBe(0);
+
+  expect(calls).toEqual([
+    {
+      url: "http://subpolar-manager:8787/v1/environments/admin/status",
+      authorization: `Bearer ${token}`,
+      body: {},
+    },
+  ]);
+  expect(JSON.parse(output.stdout[0]!)).toEqual({
+    ok: true,
+    registeredEnvironmentCount: 2,
+  });
+  expect(output.stdout.join(" ")).not.toContain(token);
+  expect(output.stderr).toEqual([]);
+});
+
+test("admin CLI help advertises the supported read-only inspection commands", async () => {
+  const output = capture();
+  expect(await runAdminCli(["--help"], { io: output.io })).toBe(0);
+  expect(output.stdout.join("")).toContain("subpolar status [--json]");
+  expect(output.stdout.join("")).toContain("subpolar environments list [--owner-id ID] [--json]");
+  expect(output.stdout.join("")).toContain("subpolar environments inspect WORKTREE [--json]");
+  expect(output.stderr).toEqual([]);
+});
+
 test("environment admin CLI lists and inspects environments through the authenticated manager", async () => {
   const calls: Array<{ url: string; authorization: string | null; body: unknown }> = [];
   const environment = {

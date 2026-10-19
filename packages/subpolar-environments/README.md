@@ -19,7 +19,9 @@ token.
 Commands:
 
 ```sh
+subpolar --help
 subpolar status [--json]
+subpolar doctor [--json]
 subpolar environments list [--owner-id ID] [--json]
 subpolar environments inspect /workspaces/project/worktree [--json]
 subpolar environments start /workspaces/project/worktree [--json]
@@ -29,5 +31,10 @@ subpolar environments rebuild /workspaces/project/worktree [--json]
 subpolar environments remove /workspaces/project/worktree [--json]
 subpolar environments reconcile [--json]
 ```
+
+`status`, `environments list`, and `environments inspect` are read-only manager
+queries. The separately packaged `@subpolar/tools` CLI inspects the tool catalog
+with `list` and `describe`; neither CLI provides an agent/profile catalog because
+profile definitions are supplied by the host application.
 
 `rebuild` replaces the environment container and starts a new one while preserving the T3 worktree and the manager-owned runtime data volume. `remove` deletes the environment registration, container, and that private runtime data volume; it does not delete the T3 worktree. Pi configuration and native session files use the persistent volume, so a T3 ACP session can continue after a worker restart when its saved Pi state is present. T3 remains the history authority; a missing or mismatched Pi session fails closed. Selected Dev Container configurations may define `postCreateCommand` and `postStartCommand` as shell strings or argv arrays. The manager runs them inside the verified worker from the worktree root; successful `postCreateCommand` runs are recorded on the runtime data volume, and a failed hook stops the worker and fails startup. Exit code `2` means invalid command or configuration, `4` means the requested environment was not found, and `1` means the manager request failed or reconciliation reported failures.
