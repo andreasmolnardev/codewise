@@ -258,7 +258,7 @@ export const layerHttpCompression = HttpRouter.middleware(HttpMiddleware.compres
 export const layerHealthRoute = HttpRouter.add(
   "GET",
   "/healthz",
-  Effect.succeed(HttpServerResponse.json({ status: "ok" })),
+  Effect.succeed(HttpServerResponse.empty({ status: 200 })),
 );
 
 export const layerBrowserApiCors = Layer.unwrap(

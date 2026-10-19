@@ -12,6 +12,7 @@ services:
       - "127.0.0.1:${T3CODE_PORT:-3773}:3773"
     environment:
       SUBPOLAR_MANAGER_URL: http://subpolar-manager:8787
+      SUBPOLAR_MANAGER_TOKEN: ${SUBPOLAR_MANAGER_TOKEN:?set a random manager token of at least 32 characters}
       SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP: "true"
       SUBPOLAR_STORAGE_ROOT: /workspaces
       SUBPOLAR_ACP_EXECUTION: managed
@@ -29,7 +30,13 @@ services:
       subpolar-manager:
         condition: service_healthy
     healthcheck:
-      test: [CMD, node, -e, "fetch('http://127.0.0.1:3773/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3773/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -66,7 +73,13 @@ services:
     group_add:
       - ${SUBPOLAR_DOCKER_GID:-999}
     healthcheck:
-      test: [CMD, bun, -e, "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      test:
+        [
+          CMD,
+          bun,
+          -e,
+          "fetch('http://127.0.0.1:8787/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
       interval: 30s
       timeout: 5s
       retries: 3

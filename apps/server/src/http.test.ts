@@ -187,14 +187,17 @@ describe("browser API CORS", () => {
 
 describe("container health route", () => {
   it("returns a minimal readiness response", async () => {
-    const layerApp = ServerHttp.layerHealthRoute.pipe(Layer.provide(NodeServices.layer));
+    const layerApp = Layer.merge(ServerHttp.layerHealthRoute, ServerHttp.layerHttpCompression).pipe(
+      Layer.provideMerge(NodeHttpPlatform.layer),
+      Layer.provide(NodeServices.layer),
+    );
     const { handler, dispose } = HttpRouter.toWebHandler(layerApp, { disableLogger: true });
 
     try {
       const response = await handler(new Request("http://localhost/healthz"));
 
       expect(response.status).toBe(200);
-      expect(await response.json()).toEqual({ status: "ok" });
+      expect(await response.text()).toBe("");
     } finally {
       await dispose();
     }
