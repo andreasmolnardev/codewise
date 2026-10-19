@@ -8,12 +8,15 @@ import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
-import type { EnvironmentManager, EnvironmentRequest } from "@subpolar/environments";
-import type { EnvironmentManagedSessionRequest } from "@subpolar/environments";
+import type {
+  EnvironmentManagedSessionRequest,
+  EnvironmentManager,
+  EnvironmentRequest,
+} from "@subpolar/environments";
 import { makeInMemoryStdio } from "../../packages/effect-acp/src/_internal/stdio.ts";
 import { createWorkerExecutionOptions } from "../../packages/subpolar-acp/src/workerExecution.ts";
 import { layerManagedStdio } from "../../packages/subpolar-acp/src/managedProxy.ts";
-import { layerStdio } from "../../packages/subpolar-acp/src/index.ts";
+import { layer as layerSubpolarAgent, layerStdio } from "../../packages/subpolar-acp/src/index.ts";
 
 type OutputChunk = { readonly data: Uint8Array } | null;
 
@@ -58,7 +61,11 @@ interface Worker {
 const workers = new Map<string, Worker>();
 let nextSession = 0;
 const manager = {
-  async startManagedSession(target: EnvironmentRequest, command: readonly string[], processRequest?: EnvironmentManagedSessionRequest) {
+  async startManagedSession(
+    target: EnvironmentRequest,
+    command: readonly string[],
+    processRequest?: EnvironmentManagedSessionRequest,
+  ) {
     const request = processRequest ?? {};
     const { stdio, input, output } = await Effect.runPromise(makeInMemoryStdio());
     const scope = await Effect.runPromise(Scope.make());
@@ -69,7 +76,7 @@ const manager = {
     const workerOptions = createWorkerExecutionOptions(request.environment ?? {}, {
       workspaceRoot: target.worktreePath,
     });
-    const worker = layerStdio({
+    const worker = layerSubpolarAgent(stdio, {
       ...workerOptions,
       executeTool: async (call, _definition, context) => {
         (report.executions as unknown[]).push({ call, cwd: context.cwd });
