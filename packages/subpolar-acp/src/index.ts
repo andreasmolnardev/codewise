@@ -7,7 +7,14 @@ import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import * as AcpSchema from "effect-acp/schema";
 import { createPolicyGateway, type RuntimeContext } from "@subpolar/runtime";
-import type { PolicyResolver, ToolCall, ToolDefinition, ToolExecutor } from "@subpolar/shared";
+import type {
+  PolicyResolver,
+  PolicyRules,
+  ResolvedAgentProfile,
+  ToolCall,
+  ToolDefinition,
+  ToolExecutor,
+} from "@subpolar/shared";
 import { validateToolInput } from "@subpolar/tools";
 import { createSubpolarRuntimeHost } from "@subpolar/runtime-host";
 import {
@@ -28,6 +35,8 @@ export interface SubpolarAcpOptions {
   readonly loadPiSdk?: () => Promise<PiSdkModule>;
   readonly executorFactory?: PiExecutorFactory<PiSdkConfig | undefined>;
   readonly principalId?: string;
+  /** Resolved server-side profile; ACP does not accept profile data from clients. */
+  readonly profile?: ResolvedAgentProfile;
   readonly toolDefinitions?: readonly ToolDefinition[];
   readonly resolveToolPolicy?: PolicyResolver;
   readonly executeTool?: ToolExecutor;
@@ -79,6 +88,17 @@ function eventText(value: unknown): string | undefined {
   return typeof text === "string" ? text : undefined;
 }
 
+function combinePolicyRules(...rules: Array<PolicyRules | undefined>): PolicyRules {
+  const present = rules.filter((rule): rule is PolicyRules => rule !== undefined);
+  if (present.some((rule) => rule.deny === true || rule.allow === false)) {
+    const reason = present.find((rule) => rule.deny === true || rule.allow === false)?.reason;
+    return { deny: true, ...(reason === undefined ? {} : { reason }) };
+  }
+  if (present.some((rule) => rule.requiresApproval === true)) return { requiresApproval: true };
+  if (present.some((rule) => rule.allow === true)) return { allow: true };
+  return {};
+}
+
 function createRuntimeHost(
   options: SubpolarAcpOptions,
   sessions: Map<string, SessionContext>,
@@ -96,7 +116,10 @@ function createRuntimeHost(
     validateInput: (input, definition) =>
       validateToolInput(input, definition.inputSchema as Parameters<typeof validateToolInput>[1]),
     resolvePolicy: async (definition, context, input) => {
-      const policy = await options.resolveToolPolicy?.(definition, context, input);
+      const policy = combinePolicyRules(
+        options.profile?.toolPolicies[definition.id],
+        await options.resolveToolPolicy?.(definition, context, input),
+      );
       // T3 must authorize each exact invocation. Persistent/"always" grants are
       // intentionally not offered by this bridge.
       return { ...(policy ?? {}), requiresApproval: true };
@@ -174,8 +197,24 @@ function makeAgent(
             : {}),
         }
       : options;
+    const allowedToolIds = initializedOptions.profile?.allowedToolIds;
+    const profileOptions: SubpolarAcpOptions = {
+      ...initializedOptions,
+      ...(initializedOptions.profile?.model === undefined
+        ? {}
+        : {
+            piConfig: { ...initializedOptions.piConfig, model: initializedOptions.profile.model },
+          }),
+      ...(allowedToolIds === undefined
+        ? {}
+        : {
+            toolDefinitions: (initializedOptions.toolDefinitions ?? []).filter((definition) =>
+              allowedToolIds.includes(definition.id),
+            ),
+          }),
+    };
     const toolNameBySdkName = new Map(
-      (initializedOptions.executeTool ? (initializedOptions.toolDefinitions ?? []) : []).map(
+      (profileOptions.executeTool ? (profileOptions.toolDefinitions ?? []) : []).map(
         (definition) => [
           `subpolar_${createHash("sha256").update(definition.id).digest("hex").slice(0, 16)}`,
           definition.id,
@@ -250,7 +289,7 @@ function makeAgent(
       initializedOptions.workerMode ?? process.env.SUBPOLAR_ACP_WORKER_MODE === "1";
     const resumeSessionIds = new Set<string>();
     const piConfig: PiSdkConfig = {
-      ...initializedOptions.piConfig,
+      ...profileOptions.piConfig,
       resumeSessionIds,
       ...(workerMode
         ? {
@@ -330,9 +369,9 @@ function makeAgent(
       }
     };
     const runtimeOptions: SubpolarAcpOptions =
-      workerMode && initializedOptions.executeTool
+      workerMode && profileOptions.executeTool
         ? {
-            ...initializedOptions,
+            ...profileOptions,
             executeTool: async (call, definition, context, signal) => {
               if (definition.id.startsWith("mcp/")) {
                 return callMcpBroker(call, context.sessionId, signal);
@@ -341,7 +380,7 @@ function makeAgent(
                 definition.id !== "internal/t3-mcp/list-tools" &&
                 definition.id !== "internal/t3-mcp/call-tool"
               ) {
-                return initializedOptions.executeTool!(call, definition, context, signal);
+                return profileOptions.executeTool!(call, definition, context, signal);
               }
               if (!context.sessionId || signal?.aborted) {
                 return {
@@ -413,7 +452,7 @@ function makeAgent(
               }
             },
           }
-        : initializedOptions;
+        : profileOptions;
     const runtime = createRuntimeHost(
       { ...runtimeOptions, piConfig },
       sessions,

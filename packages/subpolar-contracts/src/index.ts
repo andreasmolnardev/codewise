@@ -1,5 +1,7 @@
 export const CONTRACT_VERSION = "0.1";
 
+export * from "./agentProfiles.ts";
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -169,7 +171,10 @@ export interface EventReplayPort {
   replay(runId: string): Promise<readonly RunEvent[]>;
 }
 
-export type AgentExecutor = (request: RunRequest, emit?: RunProgressEmitter) => unknown | Promise<unknown>;
+export type AgentExecutor = (
+  request: RunRequest,
+  emit?: RunProgressEmitter,
+) => unknown | Promise<unknown>;
 
 export interface AgentRunPort {
   run(request: RunRequest, emit?: RunProgressEmitter): unknown | Promise<unknown>;
@@ -232,7 +237,11 @@ export interface ToolDefinitionRepository {
   create(ownerId: string, definition: ToolDefinition): Promise<ToolDefinitionRecord>;
   get(ownerId: string, toolId: string): Promise<ToolDefinitionRecord | undefined>;
   list(ownerId: string): Promise<ToolDefinitionRecord[]>;
-  update(ownerId: string, toolId: string, patch: ToolDefinitionPatch): Promise<ToolDefinitionRecord>;
+  update(
+    ownerId: string,
+    toolId: string,
+    patch: ToolDefinitionPatch,
+  ): Promise<ToolDefinitionRecord>;
 }
 
 export interface ToolPolicyRecord {
@@ -259,7 +268,10 @@ export interface ToolPolicyInput {
 export interface ToolPolicyRepository {
   save(ownerId: string, input: ToolPolicyInput): Promise<ToolPolicyRecord>;
   get(ownerId: string, id: string): Promise<ToolPolicyRecord | undefined>;
-  list(ownerId: string, filter?: { toolId?: string; agentId?: string; projectId?: string }): Promise<ToolPolicyRecord[]>;
+  list(
+    ownerId: string,
+    filter?: { toolId?: string; agentId?: string; projectId?: string },
+  ): Promise<ToolPolicyRecord[]>;
 }
 
 export interface ToolCall {
@@ -317,9 +329,7 @@ export type PolicyResolver = (
   input: unknown,
 ) => PolicyRules | Promise<PolicyRules>;
 
-export type ValidationResult =
-  | { valid: true }
-  | { valid: false; errors: string[] };
+export type ValidationResult = { valid: true } | { valid: false; errors: string[] };
 
 export type InputValidator = (
   input: unknown,
@@ -375,7 +385,11 @@ export type DurableApprovalPort = ApprovalStore;
 
 /** Owner-bound continuation storage. Implementations must keep payload opaque. */
 export interface ApprovalContinuationPort {
-  put(approvalId: string, callId: string, continuation: OpaqueContinuation): Promise<ApprovalContinuationRecord>;
+  put(
+    approvalId: string,
+    callId: string,
+    continuation: OpaqueContinuation,
+  ): Promise<ApprovalContinuationRecord>;
   load(approvalId: string): Promise<ApprovalContinuationRecord | undefined>;
 }
 
@@ -403,7 +417,12 @@ export interface ApprovalContinuationRecord extends OpaqueContinuation {
 }
 
 export interface ApprovalContinuationRepository {
-  put(ownerId: string, approvalId: string, callId: string, continuation: OpaqueContinuation): Promise<ApprovalContinuationRecord>;
+  put(
+    ownerId: string,
+    approvalId: string,
+    callId: string,
+    continuation: OpaqueContinuation,
+  ): Promise<ApprovalContinuationRecord>;
   get(ownerId: string, approvalId: string): Promise<ApprovalContinuationRecord | undefined>;
 }
 
@@ -577,9 +596,18 @@ export interface CanonicalTranscriptRecord extends CanonicalTranscriptEntry {
 }
 
 export interface CanonicalTranscriptRepository {
-  append(ownerId: string, sessionId: string, entries: readonly CanonicalTranscriptEntry[], runId?: string): Promise<CanonicalTranscriptRecord[]>;
+  append(
+    ownerId: string,
+    sessionId: string,
+    entries: readonly CanonicalTranscriptEntry[],
+    runId?: string,
+  ): Promise<CanonicalTranscriptRecord[]>;
   list(ownerId: string, sessionId: string): Promise<CanonicalTranscriptRecord[]>;
-  get(ownerId: string, sessionId: string, messageId: string): Promise<CanonicalTranscriptRecord | undefined>;
+  get(
+    ownerId: string,
+    sessionId: string,
+    messageId: string,
+  ): Promise<CanonicalTranscriptRecord | undefined>;
 }
 
 export type StructuredTranscriptRepository = CanonicalTranscriptRepository;

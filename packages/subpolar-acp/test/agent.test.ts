@@ -6,7 +6,11 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 
 import { assert, it } from "@effect/vitest";
-import { createPiSdkExecutorFactory, type PiSdkModule, type PiSessionManager } from "@subpolar/runtime-pi";
+import {
+  createPiSdkExecutorFactory,
+  type PiSdkModule,
+  type PiSessionManager,
+} from "@subpolar/runtime-pi";
 
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
 import { layer } from "../src/index.ts";
@@ -61,9 +65,13 @@ function makeMockPiSdk(appendedByTurn: unknown[][], prompts: string[]): PiSdkMod
           isPersisted: () => false,
         } satisfies PiSessionManager;
       },
-      create: () => { throw new Error("Mock Pi SDK does not persist sessions"); },
+      create: () => {
+        throw new Error("Mock Pi SDK does not persist sessions");
+      },
       findById: () => undefined,
-      open: () => { throw new Error("Mock Pi SDK does not persist sessions"); },
+      open: () => {
+        throw new Error("Mock Pi SDK does not persist sessions");
+      },
     },
     SettingsManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class {
@@ -90,7 +98,9 @@ function makeMockPiSdk(appendedByTurn: unknown[][], prompts: string[]): PiSdkMod
           },
           async abort() {},
           dispose() {},
-          get messages() { return messages; },
+          get messages() {
+            return messages;
+          },
         },
       };
     },
@@ -103,17 +113,22 @@ it.effect("runs a prompt through an injected Pi executor and keeps the ACP sessi
     const scope = yield* Scope.make();
     const seen: Array<{ cwd: string | undefined; sessionId: string | undefined }> = [];
     let markExecuted!: () => void;
-    const executorExecuted = new Promise<void>((resolve) => { markExecuted = resolve; });
-    yield* Layer.buildWithScope(layer(stdio, {
-      executorFactory: async (_config, execution) => ({
-        async execute(request) {
-          seen.push({ cwd: request.context.cwd, sessionId: request.context.sessionId });
-          markExecuted();
-          await execution?.emit({ type: "text", data: { text: "hello" } });
-          return "hello";
-        },
+    const executorExecuted = new Promise<void>((resolve) => {
+      markExecuted = resolve;
+    });
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        executorFactory: async (_config, execution) => ({
+          async execute(request) {
+            seen.push({ cwd: request.context.cwd, sessionId: request.context.sessionId });
+            markExecuted();
+            await execution?.emit({ type: "text", data: { text: "hello" } });
+            return "hello";
+          },
+        }),
       }),
-    }), scope);
+      scope,
+    );
 
     yield* send(input, initialize);
     const initialized = yield* readJsonLine(output);
@@ -124,10 +139,13 @@ it.effect("runs a prompt through an injected Pi executor and keeps the ACP sessi
     const sessionId = (created.result as { sessionId: string }).sessionId;
     assert.match(sessionId, /^subpolar-/);
 
-    yield* send(input, request(3, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "hello" }],
-    }));
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "hello" }],
+      }),
+    );
     const promptResponse = yield* readResponse(output, 3);
     yield* Effect.promise(() => executorExecuted);
     assert.equal(promptResponse.id, 3);
@@ -137,111 +155,148 @@ it.effect("runs a prompt through an injected Pi executor and keeps the ACP sessi
   }),
 );
 
-it.effect("completes mock Pi turns through ACP and carries T3 session history into the next Pi run", () =>
-  Effect.gen(function* () {
-    const { stdio, input, output } = yield* makeInMemoryStdio();
-    const scope = yield* Scope.make();
-    const appendedByTurn: unknown[][] = [];
-    const prompts: string[] = [];
-    const sdk = makeMockPiSdk(appendedByTurn, prompts);
-    yield* Layer.buildWithScope(layer(stdio, {
-      executorFactory: createPiSdkExecutorFactory(async () => sdk),
-    }), scope);
+it.effect(
+  "completes mock Pi turns through ACP and carries T3 session history into the next Pi run",
+  () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const scope = yield* Scope.make();
+      const appendedByTurn: unknown[][] = [];
+      const prompts: string[] = [];
+      const sdk = makeMockPiSdk(appendedByTurn, prompts);
+      yield* Layer.buildWithScope(
+        layer(stdio, {
+          executorFactory: createPiSdkExecutorFactory(async () => sdk),
+        }),
+        scope,
+      );
 
-    yield* send(input, initialize);
-    yield* readResponse(output, 1);
-    yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
-    const created = yield* readResponse(output, 2);
-    const sessionId = (created.result as { sessionId: string }).sessionId;
+      yield* send(input, initialize);
+      yield* readResponse(output, 1);
+      yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
+      const created = yield* readResponse(output, 2);
+      const sessionId = (created.result as { sessionId: string }).sessionId;
 
-    const completedTurn = (requestId: number, prompt: string) =>
-      Effect.gen(function* () {
-        yield* send(input, request(requestId, "session/prompt", {
-          sessionId,
-          prompt: [{ type: "text", text: prompt }],
-        }));
-        const updates: Array<Record<string, unknown>> = [];
-        let responseReceived = false;
-        let turnCompleted = false;
-        while (!responseReceived || !turnCompleted) {
-          const message = yield* readJsonLine(output);
-          if (message.id === requestId) responseReceived = true;
-          if (message.method !== "session/update") continue;
-          const params = message.params as { update?: Record<string, unknown> };
-          if (!params.update) continue;
-          updates.push(params.update);
-          if (params.update.sessionUpdate === "state_update" && params.update.state === "idle") {
-            turnCompleted = true;
+      const completedTurn = (requestId: number, prompt: string) =>
+        Effect.gen(function* () {
+          yield* send(
+            input,
+            request(requestId, "session/prompt", {
+              sessionId,
+              prompt: [{ type: "text", text: prompt }],
+            }),
+          );
+          const updates: Array<Record<string, unknown>> = [];
+          let responseReceived = false;
+          let turnCompleted = false;
+          while (!responseReceived || !turnCompleted) {
+            const message = yield* readJsonLine(output);
+            if (message.id === requestId) responseReceived = true;
+            if (message.method !== "session/update") continue;
+            const params = message.params as { update?: Record<string, unknown> };
+            if (!params.update) continue;
+            updates.push(params.update);
+            if (params.update.sessionUpdate === "state_update" && params.update.state === "idle") {
+              turnCompleted = true;
+            }
           }
-        }
-        return updates;
+          return updates;
+        });
+
+      const firstUpdates = yield* completedTurn(3, "first prompt");
+      assert.isTrue(
+        firstUpdates.some(
+          (update) =>
+            update.sessionUpdate === "agent_message_chunk" &&
+            (update.content as { text?: string } | undefined)?.text ===
+              "mock Pi answer: first prompt",
+        ),
+      );
+      assert.deepEqual(firstUpdates.at(-1), {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "end_turn",
       });
 
-    const firstUpdates = yield* completedTurn(3, "first prompt");
-    assert.isTrue(firstUpdates.some((update) =>
-      update.sessionUpdate === "agent_message_chunk" &&
-      (update.content as { text?: string } | undefined)?.text === "mock Pi answer: first prompt",
-    ));
-    assert.deepEqual(firstUpdates.at(-1), {
-      sessionUpdate: "state_update",
-      state: "idle",
-      stopReason: "end_turn",
-    });
-
-    const secondUpdates = yield* completedTurn(4, "second prompt");
-    assert.isTrue(secondUpdates.some((update) =>
-      update.sessionUpdate === "agent_message_chunk" &&
-      (update.content as { text?: string } | undefined)?.text === "mock Pi answer: second prompt",
-    ));
-    assert.deepEqual(secondUpdates.at(-1), {
-      sessionUpdate: "state_update",
-      state: "idle",
-      stopReason: "end_turn",
-    });
-    assert.deepEqual(prompts, ["first prompt", "second prompt"]);
-    assert.deepEqual(appendedByTurn[0], []);
-    const projectedHistory = appendedByTurn[1] as Array<Record<string, unknown>>;
-    assert.deepEqual(projectedHistory.map(({ timestamp: _timestamp, ...entry }) => entry), [
-      { role: "custom", customType: "subpolar.user", content: "first prompt", display: false },
-      { role: "custom", customType: "subpolar.assistant", content: JSON.stringify({ text: "mock Pi answer: first prompt" }), display: false },
-    ]);
-    assert.isTrue(projectedHistory.every((entry) => typeof entry.timestamp === "number"));
-    yield* Scope.close(scope, Exit.void);
-  }),
+      const secondUpdates = yield* completedTurn(4, "second prompt");
+      assert.isTrue(
+        secondUpdates.some(
+          (update) =>
+            update.sessionUpdate === "agent_message_chunk" &&
+            (update.content as { text?: string } | undefined)?.text ===
+              "mock Pi answer: second prompt",
+        ),
+      );
+      assert.deepEqual(secondUpdates.at(-1), {
+        sessionUpdate: "state_update",
+        state: "idle",
+        stopReason: "end_turn",
+      });
+      assert.deepEqual(prompts, ["first prompt", "second prompt"]);
+      assert.deepEqual(appendedByTurn[0], []);
+      const projectedHistory = appendedByTurn[1] as Array<Record<string, unknown>>;
+      assert.deepEqual(
+        projectedHistory.map(({ timestamp: _timestamp, ...entry }) => entry),
+        [
+          { role: "custom", customType: "subpolar.user", content: "first prompt", display: false },
+          {
+            role: "custom",
+            customType: "subpolar.assistant",
+            content: JSON.stringify({ text: "mock Pi answer: first prompt" }),
+            display: false,
+          },
+        ],
+      );
+      assert.isTrue(projectedHistory.every((entry) => typeof entry.timestamp === "number"));
+      yield* Scope.close(scope, Exit.void);
+    }),
 );
 it.effect("forwards ACP cancellation to the transient Pi executor", () =>
   Effect.gen(function* () {
     const { stdio, input, output } = yield* makeInMemoryStdio();
     const scope = yield* Scope.make();
     let markStarted!: () => void;
-    const executorStarted = new Promise<void>((resolve) => { markStarted = resolve; });
+    const executorStarted = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     let aborted = false;
-    yield* Layer.buildWithScope(layer(stdio, {
-      executorFactory: async () => ({
-        execute: (execution) => new Promise((resolve) => {
-          markStarted();
-          if (execution.signal?.aborted) {
-            aborted = true;
-            resolve("cancelled");
-            return;
-          }
-          execution.signal?.addEventListener("abort", () => {
-            aborted = true;
-            resolve("cancelled");
-          }, { once: true });
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        executorFactory: async () => ({
+          execute: (execution) =>
+            new Promise((resolve) => {
+              markStarted();
+              if (execution.signal?.aborted) {
+                aborted = true;
+                resolve("cancelled");
+                return;
+              }
+              execution.signal?.addEventListener(
+                "abort",
+                () => {
+                  aborted = true;
+                  resolve("cancelled");
+                },
+                { once: true },
+              );
+            }),
         }),
       }),
-    }), scope);
+      scope,
+    );
 
     yield* send(input, initialize);
     yield* readJsonLine(output);
     yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
     const created = yield* readJsonLine(output);
     const sessionId = (created.result as { sessionId: string }).sessionId;
-    yield* send(input, request(3, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "wait" }],
-    }));
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "wait" }],
+      }),
+    );
     yield* readResponse(output, 3);
     yield* Effect.promise(() => executorStarted);
     yield* send(input, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
@@ -249,7 +304,9 @@ it.effect("forwards ACP cancellation to the transient Pi executor", () =>
     let cancelled = false;
     while (!cancelled) {
       const message = yield* readJsonLine(output);
-      const update = (message.params as { update?: { state?: string; stopReason?: string } } | undefined)?.update;
+      const update = (
+        message.params as { update?: { state?: string; stopReason?: string } } | undefined
+      )?.update;
       cancelled = update?.state === "idle" && update.stopReason === "cancelled";
     }
     assert.equal(aborted, true);
@@ -261,26 +318,37 @@ it.effect("reports an unavailable Pi SDK as an explicit ACP session error", () =
   Effect.gen(function* () {
     const { stdio, input, output } = yield* makeInMemoryStdio();
     const scope = yield* Scope.make();
-    yield* Layer.buildWithScope(layer(stdio, {
-      loadPiSdk: async () => { throw new Error("test SDK missing"); },
-    }), scope);
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        loadPiSdk: async () => {
+          throw new Error("test SDK missing");
+        },
+      }),
+      scope,
+    );
 
     yield* send(input, initialize);
     yield* readResponse(output, 1);
     yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
     const created = yield* readResponse(output, 2);
     const sessionId = (created.result as { sessionId: string }).sessionId;
-    yield* send(input, request(3, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "hello" }],
-    }));
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "hello" }],
+      }),
+    );
     yield* readResponse(output, 3);
 
     let errorReported = false;
     while (!errorReported) {
       const message = yield* readJsonLine(output);
-      const update = message.params as { update?: { content?: Array<{ text?: string }> } } | undefined;
-      errorReported = update?.update?.content?.some((block) => block.text?.includes("test SDK missing")) ?? false;
+      const update = message.params as
+        | { update?: { content?: Array<{ text?: string }> } }
+        | undefined;
+      errorReported =
+        update?.update?.content?.some((block) => block.text?.includes("test SDK missing")) ?? false;
     }
     assert.equal(errorReported, true);
     yield* Scope.close(scope, Exit.void);
@@ -293,43 +361,63 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
     const scope = yield* Scope.make();
     const executed: unknown[] = [];
     let markExecuted!: () => void;
-    const executionFinished = new Promise<void>((resolve) => { markExecuted = resolve; });
-    yield* Layer.buildWithScope(layer(stdio, {
-      toolDefinitions: [{
-        id: "test.echo",
-        namespace: "test",
-        description: "Echo a value",
-        inputSchema: {
-          type: "object",
-          properties: { value: { type: "string" } },
-          required: ["value"],
-          additionalProperties: false,
+    const executionFinished = new Promise<void>((resolve) => {
+      markExecuted = resolve;
+    });
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        toolDefinitions: [
+          {
+            id: "test.echo",
+            namespace: "test",
+            description: "Echo a value",
+            inputSchema: {
+              type: "object",
+              properties: { value: { type: "string" } },
+              required: ["value"],
+              additionalProperties: false,
+            },
+            enabled: true,
+            risk: "low",
+          },
+        ],
+        resolveToolPolicy: () => ({ allow: true }),
+        profile: {
+          model: "profile-model",
+          allowedToolIds: ["test.echo"],
+          toolPolicies: { "test.echo": { allow: true } },
         },
-        enabled: true,
-        risk: "low",
-      }],
-      resolveToolPolicy: () => ({ allow: true }),
-      executeTool: async (call) => {
-        executed.push(call);
-        markExecuted();
-        return { ok: true, value: { echoed: true } };
-      },
-      executorFactory: async (_config, request) => ({
-        async execute() {
-          return request!.tools!.call({ callId: "exact-call-1", toolId: "test.echo", input: { value: "hello" } });
+        executeTool: async (call) => {
+          executed.push(call);
+          markExecuted();
+          return { ok: true, value: { echoed: true } };
         },
+        executorFactory: async (_config, request) => ({
+          async execute() {
+            assert.equal((_config as { model?: string } | undefined)?.model, "profile-model");
+            return request!.tools!.call({
+              callId: "exact-call-1",
+              toolId: "test.echo",
+              input: { value: "hello" },
+            });
+          },
+        }),
       }),
-    }), scope);
+      scope,
+    );
 
     yield* send(input, initialize);
     yield* readResponse(output, 1);
     yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
     const created = yield* readResponse(output, 2);
     const sessionId = (created.result as { sessionId: string }).sessionId;
-    yield* send(input, request(3, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "call the tool" }],
-    }));
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "call the tool" }],
+      }),
+    );
     let promptResponseReceived = false;
     let permissionRequest: Record<string, unknown> | undefined;
     while (!promptResponseReceived || !permissionRequest) {
@@ -339,11 +427,12 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
     }
     const params = permissionRequest.params as {
       sessionId: string;
-      toolCall: { toolCallId: string; name: string; rawInput: unknown };
+      subject: { type: string; toolCall: { toolCallId: string; name: string; rawInput: unknown } };
       options: Array<{ optionId: string; kind: string }>;
     };
     assert.equal(params.sessionId, sessionId);
-    assert.deepEqual(params.toolCall, {
+    assert.equal(params.subject.type, "tool_call");
+    assert.deepEqual(params.subject.toolCall, {
       toolCallId: "exact-call-1",
       kind: "other",
       status: "pending",
@@ -351,10 +440,13 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
       name: "test.echo",
       rawInput: { value: "hello" },
     });
-    assert.deepEqual(params.options.map(({ optionId, kind }) => ({ optionId, kind })), [
-      { optionId: "allow-once", kind: "allow_once" },
-      { optionId: "reject-once", kind: "reject_once" },
-    ]);
+    assert.deepEqual(
+      params.options.map(({ optionId, kind }) => ({ optionId, kind })),
+      [
+        { optionId: "allow-once", kind: "allow_once" },
+        { optionId: "reject-once", kind: "reject_once" },
+      ],
+    );
     yield* send(input, {
       jsonrpc: "2.0",
       id: permissionRequest.id,
@@ -376,61 +468,148 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
   }),
 );
 
-it.effect("registers initialized provider-instance MCP tools through the same ACP approval gateway", () =>
+it.effect("keeps a resolved profile denial above provider policy and T3 approval", () =>
   Effect.gen(function* () {
     const { stdio, input, output } = yield* makeInMemoryStdio();
     const scope = yield* Scope.make();
-    let closed = false;
-    let markExecuted!: () => void;
-    const executionFinished = new Promise<void>((resolve) => { markExecuted = resolve; });
-    yield* Layer.buildWithScope(layer(stdio, {
-      initializeTools: async () => ({
-        toolDefinitions: [{
-          id: "mcp/issues/search",
-          namespace: "issues",
-          description: "Search the issue tracker",
-          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
-          enabled: true,
-          risk: "high",
-        }],
-        executeTool: async (call) => {
-          assert.equal(call.toolId, "mcp/issues/search");
-          markExecuted();
-          return { ok: true, value: { content: [{ type: "text", text: "issue found" }] } };
+    let toolResult: unknown;
+    let markFinished!: () => void;
+    const finished = new Promise<void>((resolve) => {
+      markFinished = resolve;
+    });
+    let executed = false;
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        toolDefinitions: [
+          {
+            id: "test.echo",
+            namespace: "test",
+            description: "Echo a value",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            enabled: true,
+            risk: "low",
+          },
+        ],
+        profile: { toolPolicies: { "test.echo": { deny: true, reason: "blocked by profile" } } },
+        resolveToolPolicy: () => ({ allow: true }),
+        executeTool: async () => {
+          executed = true;
+          return { ok: true, value: null };
         },
-        close: async () => { closed = true; },
+        executorFactory: async (_config, request) => ({
+          async execute() {
+            toolResult = await request!.tools!.call({
+              callId: "denied-call",
+              toolId: "test.echo",
+              input: {},
+            });
+            markFinished();
+            return "done";
+          },
+        }),
       }),
-      executorFactory: async (_config, runtime) => ({
-        async execute() {
-          return runtime!.tools!.call({ callId: "mcp-call-1", toolId: "mcp/issues/search", input: { query: "regression" } });
-        },
-      }),
-    }), scope);
+      scope,
+    );
 
     yield* send(input, initialize);
     yield* readResponse(output, 1);
     yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
     const created = yield* readResponse(output, 2);
     const sessionId = (created.result as { sessionId: string }).sessionId;
-    yield* send(input, request(3, "session/prompt", {
-      sessionId,
-      prompt: [{ type: "text", text: "Search issues" }],
-    }));
-    let responseReceived = false;
-    let permission: Record<string, unknown> | undefined;
-    while (!responseReceived || !permission) {
-      const message = yield* readJsonLine(output);
-      if (message.id === 3) responseReceived = true;
-      if (message.method === "session/request_permission") permission = message;
-    }
-    assert.equal((permission.params as { toolCall: { name: string } }).toolCall.name, "mcp/issues/search");
-    yield* send(input, {
-      jsonrpc: "2.0",
-      id: permission.id,
-      result: { outcome: { outcome: "selected", optionId: "allow-once" } },
-    });
-    yield* Effect.promise(() => executionFinished);
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "call the tool" }],
+      }),
+    );
+    yield* Effect.promise(() => finished);
+    assert.equal((toolResult as { ok?: unknown }).ok, false);
+    assert.equal(executed, false);
     yield* Scope.close(scope, Exit.void);
-    assert.equal(closed, true);
   }),
+);
+
+it.effect(
+  "registers initialized provider-instance MCP tools through the same ACP approval gateway",
+  () =>
+    Effect.gen(function* () {
+      const { stdio, input, output } = yield* makeInMemoryStdio();
+      const scope = yield* Scope.make();
+      let closed = false;
+      let markExecuted!: () => void;
+      const executionFinished = new Promise<void>((resolve) => {
+        markExecuted = resolve;
+      });
+      yield* Layer.buildWithScope(
+        layer(stdio, {
+          initializeTools: async () => ({
+            toolDefinitions: [
+              {
+                id: "mcp/issues/search",
+                namespace: "issues",
+                description: "Search the issue tracker",
+                inputSchema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                  required: ["query"],
+                },
+                enabled: true,
+                risk: "high",
+              },
+            ],
+            executeTool: async (call) => {
+              assert.equal(call.toolId, "mcp/issues/search");
+              markExecuted();
+              return { ok: true, value: { content: [{ type: "text", text: "issue found" }] } };
+            },
+            close: async () => {
+              closed = true;
+            },
+          }),
+          executorFactory: async (_config, runtime) => ({
+            async execute() {
+              return runtime!.tools!.call({
+                callId: "mcp-call-1",
+                toolId: "mcp/issues/search",
+                input: { query: "regression" },
+              });
+            },
+          }),
+        }),
+        scope,
+      );
+
+      yield* send(input, initialize);
+      yield* readResponse(output, 1);
+      yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
+      const created = yield* readResponse(output, 2);
+      const sessionId = (created.result as { sessionId: string }).sessionId;
+      yield* send(
+        input,
+        request(3, "session/prompt", {
+          sessionId,
+          prompt: [{ type: "text", text: "Search issues" }],
+        }),
+      );
+      let responseReceived = false;
+      let permission: Record<string, unknown> | undefined;
+      while (!responseReceived || !permission) {
+        const message = yield* readJsonLine(output);
+        if (message.id === 3) responseReceived = true;
+        if (message.method === "session/request_permission") permission = message;
+      }
+      assert.equal(
+        (permission.params as { toolCall: { name: string } }).toolCall.name,
+        "mcp/issues/search",
+      );
+      yield* send(input, {
+        jsonrpc: "2.0",
+        id: permission.id,
+        result: { outcome: { outcome: "selected", optionId: "allow-once" } },
+      });
+      yield* Effect.promise(() => executionFinished);
+      yield* Scope.close(scope, Exit.void);
+      assert.equal(closed, true);
+    }),
 );
