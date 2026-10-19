@@ -4,6 +4,7 @@ import path from "node:path";
 import { createEnvironmentManagerHttpClient } from "@subpolar/environments/manager-client";
 import type { ToolDefinition, ToolExecutor } from "@subpolar/shared";
 import type { SubpolarAcpOptions } from "./index.ts";
+import { readSubpolarAgentProfile } from "./agentProfile.ts";
 
 const MAX_CAPTURED_OUTPUT_BYTES = 128 * 1024;
 
@@ -11,13 +12,14 @@ const MAX_CAPTURED_OUTPUT_BYTES = 128 * 1024;
 export function createManagedExecutionOptions(
   environment: NodeJS.ProcessEnv,
   fetcher?: typeof fetch,
-): Pick<SubpolarAcpOptions, "principalId" | "toolDefinitions" | "executeTool"> {
+): Pick<SubpolarAcpOptions, "principalId" | "toolDefinitions" | "executeTool" | "profile"> {
+  const profile = readSubpolarAgentProfile(environment);
   const managerUrl = environment.SUBPOLAR_MANAGER_URL?.trim();
   const managerToken = environment.SUBPOLAR_MANAGER_INSTANCE_TOKEN?.trim();
   const storageRoot = environment.SUBPOLAR_STORAGE_ROOT?.trim();
   const ownerId = environment.SUBPOLAR_OWNER_ID?.trim();
   const configured = [managerUrl, managerToken, storageRoot, ownerId].filter(Boolean).length;
-  if (configured === 0) return {};
+  if (configured === 0) return profile === undefined ? {} : { profile };
   if (configured !== 4) {
     throw new Error("Managed ACP execution requires SUBPOLAR_MANAGER_URL, SUBPOLAR_MANAGER_INSTANCE_TOKEN, SUBPOLAR_STORAGE_ROOT, and SUBPOLAR_OWNER_ID");
   }
@@ -84,5 +86,5 @@ export function createManagedExecutionOptions(
     }
   };
 
-  return { principalId: ownerId!, toolDefinitions: [definition], executeTool };
+  return { ...(profile === undefined ? {} : { profile }), principalId: ownerId!, toolDefinitions: [definition], executeTool };
 }

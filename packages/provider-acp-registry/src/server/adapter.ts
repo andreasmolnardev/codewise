@@ -30,6 +30,7 @@ import { registerSubpolarCredentialExtension } from "./subpolarCredentials.ts";
 import { registerSubpolarModelEgressExtension } from "./subpolarModelEgress.ts";
 import { bindSubpolarProviderInstanceEnvironment } from "./subpolarInstanceEnvironment.ts";
 import { subpolarMcpEnvironment } from "./subpolarMcpConfig.ts";
+import { subpolarAgentProfileEnvironment } from "./subpolarAgentProfiles.ts";
 import {
   normalizeAcpRegistryCommands,
   normalizeAcpRegistryLiveConfiguration,
@@ -197,10 +198,14 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     options.settings.enableSubpolarCredentialBroker ||
     options.settings.enableSubpolarModelEgress;
   const providerEnvironment = isSubpolar
-    ? yield* subpolarMcpEnvironment({
+    ? yield* subpolarAgentProfileEnvironment({
         stateDir: options.host.paths.stateDir,
         providerInstanceId: options.instanceId,
-        environment: options.environment,
+        environment: yield* subpolarMcpEnvironment({
+          stateDir: options.host.paths.stateDir,
+          providerInstanceId: options.instanceId,
+          environment: options.environment,
+        }),
       })
     : options.environment;
   const runtimeOptions = { ...options, environment: providerEnvironment };

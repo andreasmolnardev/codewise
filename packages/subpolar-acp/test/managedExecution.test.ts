@@ -22,6 +22,15 @@ test("managed execution is absent when manager configuration is unset and reject
   })).toThrow(/SUBPOLAR_MANAGER_INSTANCE_TOKEN/);
 });
 
+test("local ACP execution carries the server-selected profile into the runtime", () => {
+  expect(createManagedExecutionOptions({
+    SUBPOLAR_AGENT_PROFILE_JSON: JSON.stringify({ instructions: "review", toolPolicies: {} }),
+  }).profile).toEqual({ instructions: "review", toolPolicies: {} });
+  expect(() => createManagedExecutionOptions({
+    SUBPOLAR_AGENT_PROFILE_JSON: "{broken",
+  })).toThrow(/profile is invalid/);
+});
+
 test("managed execution routes only the approved argv tool through the manager client", async () => {
   let seen: { url: string; authorization: string | null; body: Record<string, unknown> } | undefined;
   const fetcher = (async (input: RequestInfo | URL, init?: RequestInit) => {

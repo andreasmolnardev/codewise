@@ -60,6 +60,24 @@ Use HTTPS URLs without embedded credentials, query parameters, or fragments.
 Each server's host is allowlisted for that provider instance only. Restart the
 managed ACP thread after changing this file.
 
+## Provider-scoped agent profiles
+
+Create a JSON file containing one profile, then add and select it for the ACP
+provider instance. The T3 CLI stores profiles in its private
+`userdata/subpolar-agent-profiles.json` file:
+
+```sh
+t3 subpolar profiles add --provider-instance subpolar_team_a --file ./profile.json
+t3 subpolar profiles list --provider-instance subpolar_team_a
+t3 subpolar profiles select --provider-instance subpolar_team_a concise
+t3 subpolar profiles remove --provider-instance subpolar_team_a concise
+```
+
+Profiles support `id`, `name`, `preferredHarness`, `model`, `thinkingLevel`,
+`instructions`, `allowedToolIds`, and `toolPolicies`. Credentials and other
+fields are rejected. Selecting a profile applies only to that provider
+instance. Restart its managed ACP thread after changing the selected profile.
+
 The workspace path must be absolute and writable by UID 1000 (`codewise`) in
 the gateway container. On Linux, make sure the host directory grants that
 container user write access before starting Compose. Docker Desktop manages host

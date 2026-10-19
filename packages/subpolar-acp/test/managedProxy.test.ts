@@ -354,7 +354,10 @@ test("managed proxy keeps the T3 MCP bearer on the host and relays tools through
     });
   };
   await Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
-    environment: baseEnvironment,
+    environment: {
+      ...baseEnvironment,
+      SUBPOLAR_AGENT_PROFILE_JSON: JSON.stringify({ model: "mock-managed", toolPolicies: {} }),
+    },
     manager: fake.manager,
     fetch: fetcher,
   }), scope));
@@ -377,6 +380,9 @@ test("managed proxy keeps the T3 MCP bearer on the host and relays tools through
   const nativeSessionId = (created.result as { sessionId: string }).sessionId;
   const started = fake.calls.find((call) => call.method === "start");
   expect(started?.process?.environment).toMatchObject({ SUBPOLAR_T3_MCP_BRIDGE: "1" });
+  expect(started?.process?.environment).toMatchObject({
+    SUBPOLAR_AGENT_PROFILE_JSON: JSON.stringify({ model: "mock-managed", toolPolicies: {} }),
+  });
   expect(started?.process?.environment).not.toHaveProperty("T3_ACP_MCP_AUTHORIZATION");
   expect(fake.calls.some((call) => call.method === "write" && call.data?.includes('"method":"session/new"') && call.data.includes('"mcpServers":[]'))).toBe(true);
 

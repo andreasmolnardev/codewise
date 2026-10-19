@@ -5,6 +5,7 @@ import path from "node:path";
 import { canonicalizeToolId } from "@subpolar/tools";
 import type { ExecutionContext, ToolCall, ToolDefinition, ToolExecutor } from "@subpolar/shared";
 import type { SubpolarAcpOptions } from "./index.ts";
+import { readSubpolarAgentProfile } from "./agentProfile.ts";
 
 const MAX_CAPTURED_OUTPUT_BYTES = 128 * 1024;
 const TERMINATION_GRACE_MS = 1_000;
@@ -356,18 +357,20 @@ export function createWorkerExecutionOptions(
   dependencies: WorkerExecutionDependencies = {},
 ): Pick<
   SubpolarAcpOptions,
-  "workerMode" | "principalId" | "toolDefinitions" | "executeTool" | "sessionCwd"
+  "workerMode" | "principalId" | "toolDefinitions" | "executeTool" | "sessionCwd" | "profile"
 > {
   if (environment.SUBPOLAR_ACP_WORKER_MODE !== "1") return {};
   const definition = makeDefinition();
   const mcpDefinitions = readWorkerMcpToolDefinitions(environment);
   const t3McpDefinitions = environment.SUBPOLAR_T3_MCP_BRIDGE === "1" ? makeT3McpDefinitions() : [];
+  const profile = readSubpolarAgentProfile(environment);
   const executeTool: ToolExecutor = (call, _definition, context, signal) =>
     executeLocal(call, context, signal, dependencies);
   return {
     workerMode: true,
     principalId: "subpolar-worker",
     sessionCwd: () => dependencies.workspaceRoot ?? process.cwd(),
+    ...(profile === undefined ? {} : { profile }),
     toolDefinitions: [definition, ...t3McpDefinitions, ...mcpDefinitions],
     executeTool,
   };

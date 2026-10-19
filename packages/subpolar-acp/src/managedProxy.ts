@@ -28,6 +28,7 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 import { callT3Mcp, type T3McpBridgeConnection } from "./t3McpBridge.ts";
+import { readSubpolarAgentProfile, serializeSubpolarAgentProfile } from "./agentProfile.ts";
 import { MCP_TOOL_CATALOG_ENV } from "./workerExecution.ts";
 
 export interface ManagedAcpProxyOptions {
@@ -65,6 +66,8 @@ function workerEnvironment(source: NodeJS.ProcessEnv, mcpTools: readonly ToolDef
     if (Buffer.byteLength(catalog) > 64_000) throw new Error("Managed MCP tool catalog exceeds its size limit");
     result[MCP_TOOL_CATALOG_ENV] = catalog;
   }
+  const profile = readSubpolarAgentProfile(source);
+  if (profile !== undefined) result.SUBPOLAR_AGENT_PROFILE_JSON = serializeSubpolarAgentProfile(profile);
   return result;
 }
 

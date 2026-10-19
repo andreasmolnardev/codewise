@@ -33,7 +33,9 @@ test("worker execution requires its explicit proxy flag and does not use manager
     SUBPOLAR_MANAGER_URL: "http://unused",
     SUBPOLAR_MANAGER_TOKEN: "manager-secret",
     SUBPOLAR_STORAGE_ROOT: "/unused",
+    SUBPOLAR_AGENT_PROFILE_JSON: JSON.stringify({ model: "mock-local", toolPolicies: {} }),
   });
+  expect(enabled.profile).toEqual({ model: "mock-local", toolPolicies: {} });
   expect(enabled.toolDefinitions).toMatchObject([{ id: "internal/worker/execute", enabled: true }]);
   expect(enabled.toolDefinitions?.[0]?.id).not.toContain("managed");
   expect(createWorkerExecutionOptions({
