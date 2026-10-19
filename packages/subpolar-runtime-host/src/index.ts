@@ -4,6 +4,7 @@ import type {
   RunEventSink,
   StatelessRunResult,
 } from "@subpolar/shared";
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createStatelessSubpolarRuntime, type ToolGateway } from "@subpolar/runtime";
 import {
@@ -29,7 +30,7 @@ export interface RuntimeHostCapabilities {
     "session.create": true;
     "session.resume": boolean;
     "session.persistence": boolean;
-    "run.outcome.persistence": false;
+    "run.outcome.persistence": boolean;
     "event.replay": false;
     "multi-process-concurrency": false;
     "container-isolation": false;
@@ -48,10 +49,22 @@ export interface RuntimeHostPromptOptions {
 
 interface SessionState {
   id: string;
+  piSessionId: string;
   principal?: Principal;
   transcript: PiTranscriptEntry[];
   active?: AbortController;
   activeRun?: Promise<StatelessRunResult>;
+}
+
+type StoredRun = { runId: string; sessionId: string; state: string; updatedAt: string };
+type HostLedger = { version: 1; sessions: Record<string, { piSessionId: string; principal?: Principal }>; runs: Record<string, StoredRun> };
+
+function readLedger(file: string): HostLedger {
+  try {
+    const value = JSON.parse(readFileSync(file, "utf8")) as HostLedger;
+    if (value.version === 1 && value.sessions && value.runs) return value;
+  } catch { /* A missing or unreadable ledger starts empty. */ }
+  return { version: 1, sessions: {}, runs: {} };
 }
 
 function jsonValue(value: unknown): PiTranscriptEntry["content"] {
@@ -82,6 +95,8 @@ export class SubpolarRuntimeHost {
   private readonly runtime;
   private readonly now: () => Date;
   private readonly createId: () => string;
+  private readonly ledgerFile?: string;
+  private readonly ledger: HostLedger;
 
   constructor(private readonly options: SubpolarRuntimeHostOptions<unknown>) {
     const config = options.piConfig as { runtimeDataDir?: unknown } | undefined;
@@ -91,6 +106,19 @@ export class SubpolarRuntimeHost {
     const persistent = options.piFactory.supportsPersistentSessions === true
       && typeof runtimeDataDir === "string"
       && path.isAbsolute(runtimeDataDir);
+    this.ledgerFile = persistent ? path.join(runtimeDataDir, "subpolar-runtime-host.json") : undefined;
+    this.ledger = this.ledgerFile ? readLedger(this.ledgerFile) : { version: 1, sessions: {}, runs: {} };
+    if (this.ledgerFile) {
+      // The host cannot know whether an interrupted Pi side effect completed. Record uncertainty
+      // and leave reconciliation to T3's authoritative event log; never replay on startup.
+      for (const run of Object.values(this.ledger.runs)) {
+        if (run.state === "running") {
+          run.state = "unknown";
+          run.updatedAt = (options.now ?? (() => new Date()))().toISOString();
+        }
+      }
+      this.persistLedger();
+    }
     this.capabilities = Object.freeze({
       scope: "process",
       durability: persistent ? "persistent" : "ephemeral",
@@ -98,7 +126,7 @@ export class SubpolarRuntimeHost {
         "session.create": true,
         "session.resume": persistent,
         "session.persistence": persistent,
-        "run.outcome.persistence": false,
+        "run.outcome.persistence": persistent,
         "event.replay": false,
         "multi-process-concurrency": false,
         "container-isolation": false,
@@ -113,7 +141,7 @@ export class SubpolarRuntimeHost {
       (execution) => {
         const id = execution.context.sessionId;
         const session = id ? this.sessions.get(id) : undefined;
-        return { entries: session?.transcript ?? [], sessionId: id };
+        return { entries: session?.transcript ?? [], sessionId: session?.piSessionId ?? id };
       },
       options.gateway.tools,
     );
@@ -130,12 +158,17 @@ export class SubpolarRuntimeHost {
     if (requestedId) {
       const existing = this.sessions.get(requestedId);
       if (existing) return { sessionId: requestedId, capabilities: this.capabilities };
-      this.sessions.set(requestedId, { id: requestedId, principal, transcript: [] });
+      const stored = this.ledger.sessions[requestedId];
+      this.sessions.set(requestedId, { id: requestedId, piSessionId: stored?.piSessionId ?? requestedId, principal: principal ?? stored?.principal, transcript: [] });
+      if (!stored) this.ledger.sessions[requestedId] = { piSessionId: requestedId, principal };
+      this.persistLedger();
       return { sessionId: requestedId, capabilities: this.capabilities };
     }
     let id = this.createId();
     while (this.sessions.has(id)) id = this.createId();
-    this.sessions.set(id, { id, principal, transcript: [] });
+    this.sessions.set(id, { id, piSessionId: id, principal, transcript: [] });
+    this.ledger.sessions[id] = { piSessionId: id, principal };
+    this.persistLedger();
     return { sessionId: id, capabilities: this.capabilities };
   }
 
@@ -147,7 +180,10 @@ export class SubpolarRuntimeHost {
     }
     const existing = this.sessions.get(sessionId);
     if (existing) return { sessionId, capabilities: this.capabilities };
-    this.sessions.set(sessionId, { id: sessionId, principal, transcript: [] });
+    const stored = this.ledger.sessions[sessionId];
+    this.sessions.set(sessionId, { id: sessionId, piSessionId: stored?.piSessionId ?? sessionId, principal: principal ?? stored?.principal, transcript: [] });
+    this.ledger.sessions[sessionId] ??= { piSessionId: sessionId, principal };
+    this.persistLedger();
     return { sessionId, capabilities: this.capabilities };
   }
 
@@ -158,6 +194,8 @@ export class SubpolarRuntimeHost {
     const unlink = linkAbort(options.signal, controller);
     const requestId = this.createId();
     const runId = this.createId();
+    this.ledger.runs[runId] = { runId, sessionId, state: "running", updatedAt: this.now().toISOString() };
+    this.persistLedger();
     session.active = controller;
     const pending = this.runtime.run({
       runId,
@@ -170,6 +208,8 @@ export class SubpolarRuntimeHost {
     session.activeRun = pending;
     try {
       const result = await pending;
+      this.ledger.runs[runId] = { runId, sessionId, state: result.state, updatedAt: this.now().toISOString() };
+      this.persistLedger();
       if (result.state === "completed") {
         const occurredAt = this.now().toISOString();
         session.transcript.push(
@@ -200,6 +240,8 @@ export class SubpolarRuntimeHost {
     session.active?.abort();
     await session.activeRun?.catch(() => undefined);
     this.sessions.delete(sessionId);
+    delete this.ledger.sessions[sessionId];
+    this.persistLedger();
     return true;
   }
 
@@ -207,6 +249,14 @@ export class SubpolarRuntimeHost {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error("Runtime session does not exist in this process");
     return session;
+  }
+
+  private persistLedger(): void {
+    if (!this.ledgerFile) return;
+    mkdirSync(path.dirname(this.ledgerFile), { recursive: true });
+    const temporary = `${this.ledgerFile}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify(this.ledger), { mode: 0o600 });
+    renameSync(temporary, this.ledgerFile);
   }
 }
 

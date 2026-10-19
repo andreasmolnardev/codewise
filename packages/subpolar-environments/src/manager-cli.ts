@@ -1,7 +1,10 @@
 #!/usr/bin/env bun
 
 import { createDockerEnvironmentManager } from "./manager.ts";
-import { createEnvironmentManagerServer } from "./manager-http.ts";
+import {
+  createEnvironmentManagerServer,
+  parseEnvironmentManagerInstanceCredentials,
+} from "./manager-http.ts";
 
 function required(name: string): string {
   const value = process.env[name]?.trim();
@@ -51,7 +54,16 @@ const manager = createDockerEnvironmentManager({
   },
   registrationFile: process.env.SUBPOLAR_REGISTRATION_FILE ?? "/var/lib/subpolar/environments.json",
 });
-const server = createEnvironmentManagerServer({ manager, token: required("SUBPOLAR_MANAGER_TOKEN"), hostname: host, port });
+const instanceCredentials = process.env.SUBPOLAR_MANAGER_INSTANCE_TOKENS?.trim()
+  ? parseEnvironmentManagerInstanceCredentials(process.env.SUBPOLAR_MANAGER_INSTANCE_TOKENS)
+  : [];
+const server = createEnvironmentManagerServer({
+  manager,
+  token: required("SUBPOLAR_MANAGER_TOKEN"),
+  instanceCredentials,
+  hostname: host,
+  port,
+});
 server.once("error", (error) => {
   process.stderr.write(`Subpolar manager could not listen: ${error.message}\n`);
   process.exitCode = 1;

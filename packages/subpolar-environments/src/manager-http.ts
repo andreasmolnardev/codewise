@@ -1,5 +1,6 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
+import path from "node:path";
 import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
@@ -26,14 +27,91 @@ function jsonResponse(body: unknown, status = 200, headers?: HeadersInit): Respo
   });
 }
 
-function isAuthorized(request: Request, token: string): boolean {
+function bearerToken(request: Request): string | undefined {
   const authorization = request.headers.get("authorization");
   const supplied = authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
-  if (!supplied) return false;
+  return supplied;
+}
+
+export type EnvironmentManagerInstanceOperation =
+  | "identity" | "ensure" | "start" | "stop" | "restart" | "remove" | "execute"
+  | "pty" | "stdio" | "tcp" | "admin:list" | "admin:inspect" | "admin:rebuild";
+
+/** A bearer credential whose authority is fixed by manager configuration. */
+export interface EnvironmentManagerInstanceCredential {
+  readonly token: string;
+  readonly ownerId: string;
+  readonly storageRoot: string;
+  readonly allowedOperations: readonly EnvironmentManagerInstanceOperation[];
+}
+
+type ManagerCredential =
+  | { readonly kind: "admin"; readonly token: string }
+  | ({ readonly kind: "instance" } & EnvironmentManagerInstanceCredential);
+
+const INSTANCE_OPERATIONS = new Set<EnvironmentManagerInstanceOperation>([
+  "identity", "ensure", "start", "stop", "restart", "remove", "execute", "pty", "stdio", "tcp",
+  "admin:list", "admin:inspect", "admin:rebuild",
+]);
+
+/** Parse a server-side token registry. The opaque token is the registry key. */
+export function parseEnvironmentManagerInstanceCredentials(
+  serialized: string,
+): readonly EnvironmentManagerInstanceCredential[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(serialized);
+  } catch (cause) {
+    throw new Error("SUBPOLAR_MANAGER_INSTANCE_TOKENS must be valid JSON", { cause });
+  }
+  if (!isRecord(parsed)) throw new Error("SUBPOLAR_MANAGER_INSTANCE_TOKENS must be a JSON object");
+  const credentials: EnvironmentManagerInstanceCredential[] = [];
+  for (const [token, value] of Object.entries(parsed)) {
+    if (!isRecord(value) || typeof value.ownerId !== "string" || !value.ownerId.trim() ||
+        typeof value.storageRoot !== "string" || !path.isAbsolute(value.storageRoot) ||
+        !Array.isArray(value.allowedOperations) || value.allowedOperations.length === 0 ||
+        value.allowedOperations.some((operation) => typeof operation !== "string" || !INSTANCE_OPERATIONS.has(operation as EnvironmentManagerInstanceOperation))) {
+      throw new Error("Each manager instance token must define ownerId, an absolute storageRoot, and allowedOperations");
+    }
+    if (token.length < 32 || token.includes("\0")) throw new Error("Manager instance tokens must contain at least 32 characters");
+    credentials.push({
+      token,
+      ownerId: value.ownerId,
+      storageRoot: path.resolve(value.storageRoot),
+      allowedOperations: [...new Set(value.allowedOperations as EnvironmentManagerInstanceOperation[])],
+    });
+  }
+  return credentials;
+}
+
+function credentialsFor(adminToken: string, instances: readonly EnvironmentManagerInstanceCredential[]): readonly ManagerCredential[] {
+  if (adminToken.length < 32 || adminToken.includes("\0")) throw new Error("Manager API token must contain at least 32 characters");
+  const tokens = new Set<string>([adminToken]);
+  for (const credential of instances) {
+    if (credential.token.length < 32 || credential.token.includes("\0") ||
+        !credential.ownerId.trim() || !path.isAbsolute(credential.storageRoot) ||
+        credential.allowedOperations.length === 0 ||
+        credential.allowedOperations.some((operation) => !INSTANCE_OPERATIONS.has(operation))) {
+      throw new Error("Manager instance credential is invalid");
+    }
+    if (tokens.has(credential.token)) throw new Error("Manager API credentials must use unique tokens");
+    tokens.add(credential.token);
+  }
+  return [
+    { kind: "admin", token: adminToken },
+    ...instances.map((credential) => ({ kind: "instance" as const, ...credential })),
+  ];
+}
+
+function authenticate(request: Request, credentials: readonly ManagerCredential[]): ManagerCredential | undefined {
+  const supplied = bearerToken(request);
+  if (!supplied) return undefined;
   const suppliedBytes = Buffer.from(supplied);
-  const tokenBytes = Buffer.from(token);
-  if (suppliedBytes.byteLength !== tokenBytes.byteLength) return false;
-  return timingSafeEqual(suppliedBytes, tokenBytes);
+  for (const credential of credentials) {
+    const tokenBytes = Buffer.from(credential.token);
+    if (suppliedBytes.byteLength === tokenBytes.byteLength && timingSafeEqual(suppliedBytes, tokenBytes)) return credential;
+  }
+  return undefined;
 }
 
 async function readJson(request: Request): Promise<unknown> {
@@ -82,6 +160,25 @@ function environmentRequest(value: unknown): EnvironmentRequest {
     workspaceId: value.workspaceId,
     storageRoot: value.storageRoot,
     worktreePath: value.worktreePath,
+  };
+}
+
+function scopedEnvironmentRequest(value: unknown, credential: Extract<ManagerCredential, { kind: "instance" }>): EnvironmentRequest {
+  const request = environmentRequest(value);
+  const storageRoot = path.resolve(credential.storageRoot);
+  const worktreePath = path.resolve(request.worktreePath);
+  const relative = path.relative(storageRoot, worktreePath);
+  const expectedWorkspaceId = `ws_${createHash("sha256").update(worktreePath).digest("hex").slice(0, 24)}`;
+  if (request.ownerId !== credential.ownerId || path.resolve(request.storageRoot) !== storageRoot ||
+      request.workspaceId !== expectedWorkspaceId || relative === "" || relative === ".." ||
+      relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Environment identity does not match the authenticated provider instance");
+  }
+  return {
+    ownerId: credential.ownerId,
+    workspaceId: expectedWorkspaceId,
+    storageRoot,
+    worktreePath,
   };
 }
 
@@ -138,14 +235,19 @@ function errorCode(error: unknown): string {
  * Authenticated manager API handler. Keep this in the dedicated manager
  * process that owns Docker access; never mount the Docker socket in T3.
  */
-export function createEnvironmentManagerHttpHandler(manager: EnvironmentManager, token: string) {
-  if (token.length < 32 || token.includes("\0")) throw new Error("Manager API token must contain at least 32 characters");
+export function createEnvironmentManagerHttpHandler(
+  manager: EnvironmentManager,
+  adminToken: string,
+  instanceCredentials: readonly EnvironmentManagerInstanceCredential[] = [],
+) {
+  const credentials = credentialsFor(adminToken, instanceCredentials);
 
   return async (request: Request): Promise<Response> => {
     if (request.method === "GET" && new URL(request.url).pathname === "/healthz") {
       return jsonResponse({ ok: true });
     }
-    if (!isAuthorized(request, token)) return jsonResponse({ error: "UNAUTHORIZED" }, 401, { "www-authenticate": "Bearer" });
+    const credential = authenticate(request, credentials);
+    if (!credential) return jsonResponse({ error: "UNAUTHORIZED" }, 401, { "www-authenticate": "Bearer" });
     if (request.method !== "POST") return jsonResponse({ error: "METHOD_NOT_ALLOWED" }, 405, { allow: "POST" });
 
     const pathname = new URL(request.url).pathname;
@@ -155,6 +257,21 @@ export function createEnvironmentManagerHttpHandler(manager: EnvironmentManager,
     const adminRoute = pathname.match(/^\/v1\/environments\/admin\/(status|list|inspect|rebuild)$/)?.[1];
     const route = pathname.match(/^\/v1\/environments\/(identity|ensure|start|stop|restart|remove|execute|reconcile)$/)?.[1];
     if (!route && !adminRoute && !interactiveRoute && !managedSessionRoute && !tcpTunnelRoute) return jsonResponse({ error: "NOT_FOUND" }, 404);
+
+    const instanceOperation: EnvironmentManagerInstanceOperation | undefined =
+      adminRoute === "list" ? "admin:list" :
+      adminRoute === "inspect" ? "admin:inspect" :
+      adminRoute === "rebuild" ? "admin:rebuild" :
+      route === "reconcile" ? undefined :
+      route as EnvironmentManagerInstanceOperation | undefined ??
+      (interactiveRoute ? "pty" : managedSessionRoute ? "stdio" : tcpTunnelRoute ? "tcp" : undefined);
+    if (credential.kind === "admin") {
+      const adminLifecycleRoute = route !== undefined && ["identity", "ensure", "start", "stop", "restart", "remove"].includes(route);
+      if (!adminRoute && route !== "reconcile" && !adminLifecycleRoute) return jsonResponse({ error: "FORBIDDEN" }, 403);
+    } else if (route === "reconcile" || adminRoute === "status" || !instanceOperation ||
+      !credential.allowedOperations.includes(instanceOperation)) {
+      return jsonResponse({ error: "FORBIDDEN" }, 403);
+    }
 
     try {
       if (adminRoute === "status") {
@@ -168,21 +285,28 @@ export function createEnvironmentManagerHttpHandler(manager: EnvironmentManager,
         if (!isRecord(body) || (body.ownerId !== undefined && (typeof body.ownerId !== "string" || !body.ownerId.trim()))) {
           throw new EnvironmentManagerError("INVALID_REQUEST", "ownerId must be a non-empty string when provided");
         }
-        return jsonResponse({ environments: await manager.list(body.ownerId as string | undefined) });
+        if (credential.kind === "instance" && body.ownerId !== undefined && body.ownerId !== credential.ownerId) {
+          throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Owner does not match the authenticated provider instance");
+        }
+        return jsonResponse({ environments: await manager.list(credential.kind === "instance" ? credential.ownerId : body.ownerId as string | undefined) });
       }
       if (adminRoute === "inspect" || adminRoute === "rebuild") {
         const operation = adminRoute === "inspect" ? manager.inspect : manager.rebuild;
         if (!operation) return jsonResponse({ error: "ADMIN_UNAVAILABLE" }, 501);
         const body = await readJson(request);
         if (!isRecord(body)) throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be a JSON object");
-        const environment = environmentRequest(body.environment);
+        const environment = credential.kind === "instance"
+          ? scopedEnvironmentRequest(body.environment, credential)
+          : environmentRequest(body.environment);
         const result = await operation.call(manager, environment);
         return adminRoute === "inspect" ? jsonResponse({ environment: result }) : jsonResponse(result);
       }
       if (route === "reconcile") return jsonResponse({ results: await manager.reconcile() });
       const body = await readJson(request);
       if (!isRecord(body)) throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be a JSON object");
-      const environment = environmentRequest(body.environment);
+      const environment = credential.kind === "instance"
+        ? scopedEnvironmentRequest(body.environment, credential)
+        : environmentRequest(body.environment);
       if (tcpTunnelRoute) {
         if (typeof body.port !== "number" || !Number.isSafeInteger(body.port) || body.port < 1 || body.port > 65_535) {
           throw new EnvironmentManagerError("INVALID_REQUEST", "Port tunnel target must be a valid TCP port");
@@ -434,10 +558,11 @@ export function createEnvironmentManagerHttpHandler(manager: EnvironmentManager,
 export function createEnvironmentManagerServer(input: {
   readonly manager: EnvironmentManager;
   readonly token: string;
+  readonly instanceCredentials?: readonly EnvironmentManagerInstanceCredential[];
   readonly hostname?: string;
   readonly port?: number;
 }): Server {
-  const handle = createEnvironmentManagerHttpHandler(input.manager, input.token);
+  const handle = createEnvironmentManagerHttpHandler(input.manager, input.token, input.instanceCredentials);
   const hostname = input.hostname ?? "127.0.0.1";
   const server = createServer((incoming, outgoing) => {
     void (async () => {

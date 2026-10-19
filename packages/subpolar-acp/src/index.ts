@@ -32,6 +32,12 @@ export interface SubpolarAcpOptions {
   readonly toolDefinitions?: readonly ToolDefinition[];
   readonly resolveToolPolicy?: PolicyResolver;
   readonly executeTool?: ToolExecutor;
+  /** Initialize provider-instance tools after ACP starts and close them with its scope. */
+  readonly initializeTools?: () => Promise<{
+    readonly toolDefinitions?: readonly ToolDefinition[];
+    readonly executeTool?: ToolExecutor;
+    readonly close?: () => Promise<void>;
+  } | undefined>;
   /** Map a gateway cwd to the worker's mounted path for proxy-started sessions. */
   readonly sessionCwd?: (requestedCwd: string) => string;
 }
@@ -133,6 +139,19 @@ function createRuntimeHost(
 function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effect<AcpAgent.AcpAgent["Service"], never, import("effect/Scope").Scope> {
   return Effect.gen(function* () {
     const agent = yield* AcpAgent.make(stdio);
+    const initializedTools = yield* Effect.promise(() => options.initializeTools?.() ?? Promise.resolve(undefined));
+    if (initializedTools?.close) {
+      yield* Effect.addFinalizer(() => Effect.promise(() => initializedTools.close!()));
+    }
+    const initializedOptions: SubpolarAcpOptions = initializedTools
+      ? {
+          ...options,
+          toolDefinitions: [...(options.toolDefinitions ?? []), ...(initializedTools.toolDefinitions ?? [])],
+          ...(initializedTools.executeTool ?? options.executeTool
+            ? { executeTool: initializedTools.executeTool ?? options.executeTool }
+            : {}),
+        }
+      : options;
     const sessions = new Map<string, SessionContext>();
     const activeSessions = new Set<string>();
     const activeRunIds = new Map<string, string>();
@@ -196,7 +215,7 @@ function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effe
     const workerMode = process.env.SUBPOLAR_ACP_WORKER_MODE === "1";
     const resumeSessionIds = new Set<string>();
     const piConfig: PiSdkConfig = {
-      ...options.piConfig,
+      ...initializedOptions.piConfig,
       resumeSessionIds,
       ...(workerMode ? {
         modelRuntimeFactory: async (sdk: PiSdkModule, sessionId: string) => {
@@ -212,12 +231,12 @@ function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effe
           },
       } : {}),
     };
-    const runtimeOptions: SubpolarAcpOptions = workerMode && options.executeTool
+    const runtimeOptions: SubpolarAcpOptions = workerMode && initializedOptions.executeTool
       ? {
-          ...options,
+          ...initializedOptions,
           executeTool: async (call, definition, context, signal) => {
             if (definition.id !== "internal/t3-mcp/list-tools" && definition.id !== "internal/t3-mcp/call-tool") {
-              return options.executeTool!(call, definition, context, signal);
+              return initializedOptions.executeTool!(call, definition, context, signal);
             }
             if (!context.sessionId || signal?.aborted) {
               return { ok: false, error: { code: "T3_MCP_SESSION_UNAVAILABLE", message: "The T3 MCP session is unavailable" } };
@@ -258,7 +277,7 @@ function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effe
             }
           },
         }
-      : options;
+      : initializedOptions;
     const runtime = createRuntimeHost({ ...runtimeOptions, piConfig }, sessions, requestPermission, (sessionId, runId, event) => {
       activeRunIds.set(sessionId, runId);
       const candidate = event as { type?: unknown; data?: unknown };

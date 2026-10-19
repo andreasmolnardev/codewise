@@ -12,6 +12,7 @@ From the repository root, create a persistent workspace directory and a
 ```dotenv
 SUBPOLAR_WORKSPACES_HOST_PATH=/absolute/path/to/persistent/workspaces
 SUBPOLAR_MANAGER_TOKEN=<random secret with at least 32 characters>
+SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","stdio","execute"]}}
 # Optional: match the host group that can access /var/run/docker.sock.
 SUBPOLAR_DOCKER_GID=999
 # Optional: comma-separated exact provider instance IDs allowed to use managed Pi.
@@ -31,9 +32,17 @@ the gateway container. On Linux, make sure the host directory grants that
 container user write access before starting Compose. Docker Desktop manages host
 path sharing for macOS and Windows. The manager also mounts that host path
 read-only so it can validate workspaces and pass only the selected worktree to
-a worker. Keep the manager token private;
-the manager API is authenticated, but its Docker socket access is effectively
-host-level control.
+a worker. Keep both tokens private. The manager token is reserved for the
+administrator CLI; the instance token is limited to its configured owner,
+workspace root, and operations. The manager API is authenticated, but its
+Docker socket access is effectively host-level control.
+
+Set the registry's `ownerId` to the configured ACP provider instance ID, such
+as `subpolar_team_a`. Set the corresponding token as
+`SUBPOLAR_MANAGER_INSTANCE_TOKEN` in that provider instance's existing
+environment settings; do not put it in Compose. T3 binds `SUBPOLAR_OWNER_ID`
+and `SUBPOLAR_PROVIDER_INSTANCE_ID` to the server-assigned provider ID and
+strips any manager instance token inherited from the gateway environment.
 
 Build and start the gateway and manager:
 

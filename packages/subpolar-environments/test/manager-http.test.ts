@@ -1,11 +1,23 @@
 import { expect, test } from "bun:test";
-import { createEnvironmentManagerHttpHandler } from "../src/manager-http.ts";
+import { createHash } from "node:crypto";
+import {
+  createEnvironmentManagerHttpHandler,
+  parseEnvironmentManagerInstanceCredentials,
+  type EnvironmentManagerInstanceCredential,
+} from "../src/manager-http.ts";
 import type { EnvironmentManager, EnvironmentRequest, ManagedEnvironment } from "../src/index.ts";
 
 const TOKEN = "manager-test-token-with-more-than-thirty-two-characters";
+const INSTANCE_TOKEN = "provider-instance-token-with-more-than-thirty-two-characters";
+const instanceCredential: EnvironmentManagerInstanceCredential = {
+  token: INSTANCE_TOKEN,
+  ownerId: "user-a",
+  storageRoot: "/workspaces",
+  allowedOperations: ["identity", "ensure", "start", "stop", "restart", "remove", "execute", "pty", "stdio", "tcp", "admin:list", "admin:inspect", "admin:rebuild"],
+};
 const requestInput: EnvironmentRequest = {
   ownerId: "user-a",
-  workspaceId: "workspace-a",
+  workspaceId: `ws_${createHash("sha256").update("/workspaces/repo").digest("hex").slice(0, 24)}`,
   storageRoot: "/workspaces",
   worktreePath: "/workspaces/repo",
 };
@@ -66,7 +78,7 @@ function managerFixture() {
   return { manager, calls };
 }
 
-function makeRequest(path: string, body?: unknown, token: string | null = TOKEN) {
+function makeRequest(path: string, body?: unknown, token: string | null = INSTANCE_TOKEN) {
   return new Request(`http://manager${path}`, {
     method: "POST",
     headers: {
@@ -79,7 +91,7 @@ function makeRequest(path: string, body?: unknown, token: string | null = TOKEN)
 
 test("manager API exposes a minimal health check without manager details", async () => {
   const { manager } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
   const response = await handle(new Request("http://manager/healthz"));
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ ok: true });
@@ -87,7 +99,7 @@ test("manager API exposes a minimal health check without manager details", async
 
 test("manager API rejects missing or invalid bearer credentials before dispatch", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
 
   const missing = await handle(makeRequest("/v1/environments/ensure", { environment: requestInput }, null));
   const invalid = await handle(makeRequest("/v1/environments/ensure", { environment: requestInput }, "wrong"));
@@ -98,14 +110,85 @@ test("manager API rejects missing or invalid bearer credentials before dispatch"
   expect(calls).toEqual([]);
 });
 
+test("manager instance credentials cannot cross owners or trust caller-supplied environment identity", async () => {
+  const { manager, calls } = managerFixture();
+  const otherCredential: EnvironmentManagerInstanceCredential = {
+    ...instanceCredential,
+    token: "another-provider-instance-token-with-more-than-thirty-two-characters",
+    ownerId: "user-b",
+  };
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential, otherCredential]);
+
+  const crossOwner = await handle(makeRequest("/v1/environments/execute", {
+    environment: requestInput,
+    command: ["id"],
+  }, otherCredential.token));
+  const forgedStorageRoot = await handle(makeRequest("/v1/environments/execute", {
+    environment: { ...requestInput, storageRoot: "/" },
+    command: ["id"],
+  }));
+  const forgedWorkspace = await handle(makeRequest("/v1/environments/execute", {
+    environment: { ...requestInput, workspaceId: "another-workspace" },
+    command: ["id"],
+  }));
+  const outsideWorktree = await handle(makeRequest("/v1/environments/execute", {
+    environment: {
+      ...requestInput,
+      worktreePath: "/private/other-provider/repo",
+      workspaceId: `ws_${createHash("sha256").update("/private/other-provider/repo").digest("hex").slice(0, 24)}`,
+    },
+    command: ["id"],
+  }));
+
+  expect([crossOwner.status, forgedStorageRoot.status, forgedWorkspace.status, outsideWorktree.status]).toEqual([403, 403, 403, 403]);
+  expect(calls).toEqual([]);
+});
+
+test("manager instance credentials are operation-scoped and the admin token cannot execute work", async () => {
+  const { manager, calls } = managerFixture();
+  const readOnlyCredential = {
+    ...instanceCredential,
+    token: "read-only-provider-instance-token-with-more-than-thirty-two-characters",
+    allowedOperations: ["identity"] as const,
+  };
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [readOnlyCredential]);
+
+  const deniedOperation = await handle(makeRequest("/v1/environments/execute", {
+    environment: requestInput,
+    command: ["id"],
+  }, readOnlyCredential.token));
+  const adminDenied = await handle(makeRequest("/v1/environments/execute", {
+    environment: requestInput,
+    command: ["id"],
+  }, TOKEN));
+
+  expect(deniedOperation.status).toBe(403);
+  expect(adminDenied.status).toBe(403);
+  expect(calls).toEqual([]);
+});
+
+test("manager instance-token registry requires explicit scoped operations", () => {
+  const registry = parseEnvironmentManagerInstanceCredentials(JSON.stringify({
+    [INSTANCE_TOKEN]: {
+      ownerId: "user-a",
+      storageRoot: "/workspaces",
+      allowedOperations: ["execute"],
+    },
+  }));
+  expect(registry).toEqual([{ ...instanceCredential, allowedOperations: ["execute"] }]);
+  expect(() => parseEnvironmentManagerInstanceCredentials(JSON.stringify({
+    [INSTANCE_TOKEN]: { ownerId: "user-a", storageRoot: "/workspaces", allowedOperations: ["reconcile"] },
+  }))).toThrow();
+});
+
 test("manager admin routes require authentication and expose list, inspect, status, and rebuild", async () => {
   const { manager } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
 
   const denied = await handle(makeRequest("/v1/environments/admin/list", {}, null));
   expect(denied.status).toBe(401);
 
-  const status = await handle(makeRequest("/v1/environments/admin/status", {}));
+  const status = await handle(makeRequest("/v1/environments/admin/status", {}, TOKEN));
   expect(status.status).toBe(200);
   expect(await status.json()).toEqual({ ok: true, registeredEnvironmentCount: 1 });
 
@@ -120,11 +203,14 @@ test("manager admin routes require authentication and expose list, inspect, stat
 
   const restart = await handle(makeRequest("/v1/environments/restart", { environment: requestInput }));
   expect(await restart.json()).toEqual(environment);
+
+  const adminStart = await handle(makeRequest("/v1/environments/start", { environment: requestInput }, TOKEN));
+  expect(await adminStart.json()).toEqual(environment);
 });
 
 test("manager API validates the route body and dispatches lifecycle operations", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
 
   const response = await handle(makeRequest("/v1/environments/stop", { environment: requestInput }));
   expect(response.status).toBe(200);
@@ -138,7 +224,7 @@ test("manager API validates the route body and dispatches lifecycle operations",
 
 test("manager API streams process output and the final result as NDJSON", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
 
   const response = await handle(makeRequest("/v1/environments/execute", {
     environment: requestInput,
@@ -169,7 +255,7 @@ test("manager API cancels managed execution when its output stream is abandoned"
       return { exitCode: null, cancelled: true };
     },
   };
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
   const response = await handle(makeRequest("/v1/environments/execute", {
     environment: requestInput,
     command: ["long-running"],
@@ -183,7 +269,7 @@ test("manager API cancels managed execution when its output stream is abandoned"
 
 test("manager API starts, attaches to, controls, and terminates an authenticated TTY session", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
   const start = await handle(makeRequest("/v1/environments/pty/start", {
     environment: requestInput, command: ["/bin/sh"], process: { cwd: "packages", clientSessionId: "thread-1-terminal-1" },
   }));
@@ -215,7 +301,7 @@ test("manager API starts, attaches to, controls, and terminates an authenticated
 
 test("manager API streams authenticated non-TTY stdio sessions with separate output channels", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
   const start = await handle(makeRequest("/v1/environments/stdio/start", {
     environment: requestInput, command: ["node", "acp-server.js"], process: { cwd: "packages", clientSessionId: "thread-1-acp" },
   }));
@@ -237,7 +323,7 @@ test("manager API streams authenticated non-TTY stdio sessions with separate out
 
 test("manager API starts a loopback port tunnel for one authenticated environment", async () => {
   const { manager, calls } = managerFixture();
-  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN);
+  const handle = createEnvironmentManagerHttpHandler(manager, TOKEN, [instanceCredential]);
   const denied = await handle(makeRequest("/v1/environments/tcp/start", { environment: requestInput, port: 5173 }, null));
   expect(denied.status).toBe(401);
 

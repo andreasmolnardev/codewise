@@ -13,7 +13,6 @@ services:
     environment:
       SUBPOLAR_MANAGER_URL: http://subpolar-manager:8787
       SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP: "true"
-      SUBPOLAR_MANAGER_TOKEN: ${SUBPOLAR_MANAGER_TOKEN:?set a random manager token of at least 32 characters}
       SUBPOLAR_STORAGE_ROOT: /workspaces
       SUBPOLAR_ACP_EXECUTION: managed
       SUBPOLAR_ACP_WORKER_COMMAND: '["/usr/local/bin/subpolar-acp-worker"]'
@@ -46,6 +45,7 @@ services:
       SUBPOLAR_MANAGER_HOST: 0.0.0.0
       SUBPOLAR_MANAGER_PORT: 8787
       SUBPOLAR_MANAGER_TOKEN: ${SUBPOLAR_MANAGER_TOKEN:?set a random manager token of at least 32 characters}
+      SUBPOLAR_MANAGER_INSTANCE_TOKENS: ${SUBPOLAR_MANAGER_INSTANCE_TOKENS:?set the JSON map of provider instance tokens}
       SUBPOLAR_GATEWAY_STORAGE_ROOT: /workspaces
       SUBPOLAR_DOCKER_HOST_STORAGE_ROOT: ${SUBPOLAR_WORKSPACES_HOST_PATH:?set an absolute persistent workspace directory}
       SUBPOLAR_CONTAINER_STORAGE_ROOT: /workspaces

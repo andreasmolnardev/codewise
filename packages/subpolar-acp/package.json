@@ -23,6 +23,7 @@
     "@subpolar/runtime": "workspace:*",
     "@subpolar/runtime-host": "workspace:*",
     "@subpolar/runtime-pi": "workspace:*",
+    "@subpolar/mcp": "workspace:*",
     "@effect/platform-node": "catalog:",
     "effect": "catalog:",
     "effect-acp": "workspace:*"

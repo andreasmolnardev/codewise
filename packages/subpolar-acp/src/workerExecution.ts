@@ -2,6 +2,8 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
+import { canonicalizeToolId } from "@subpolar/tools";
+import { createProviderMcpRegistry, type ProviderMcpRegistryOptions, type SubpolarMcpConnection, type SubpolarMcpServerConfig } from "@subpolar/mcp";
 import type { ExecutionContext, ToolCall, ToolDefinition, ToolExecutor } from "@subpolar/shared";
 import type { SubpolarAcpOptions } from "./index.ts";
 
@@ -14,14 +16,92 @@ const ENVIRONMENT_KEYS = new Set([
 export interface WorkerExecutionDependencies {
   readonly workspaceRoot?: string;
   readonly onSpawn?: (child: ChildProcess) => void;
+  readonly createMcpRegistry?: (options: ProviderMcpRegistryOptions) => ReturnType<typeof createProviderMcpRegistry>;
+}
+
+const MCP_SERVERS_ENV = "SUBPOLAR_MCP_SERVERS";
+const MCP_ALLOWED_HOSTS_ENV = "SUBPOLAR_MCP_ALLOWED_HOSTS";
+const MCP_PROVIDER_ID_ENV = "SUBPOLAR_PROVIDER_INSTANCE_ID";
+
+function parseJsonArray<T>(environment: NodeJS.ProcessEnv, key: string): T[] {
+  let value: unknown;
+  try { value = JSON.parse(environment[key] ?? ""); } catch {
+    throw new Error(`${key} must be a JSON array`);
+  }
+  if (!Array.isArray(value)) throw new Error(`${key} must be a JSON array`);
+  return value as T[];
+}
+
+export async function initializeWorkerMcpTools(
+  environment: NodeJS.ProcessEnv,
+  registryFactory: NonNullable<WorkerExecutionDependencies["createMcpRegistry"]> = createProviderMcpRegistry,
+) {
+  const rawServers = environment[MCP_SERVERS_ENV];
+  const rawHosts = environment[MCP_ALLOWED_HOSTS_ENV];
+  if (!rawServers && !rawHosts) return undefined;
+  if (!rawServers || !rawHosts) throw new Error("Managed MCP requires both server configuration and an approved hostname allowlist");
+  const providerInstanceId = environment[MCP_PROVIDER_ID_ENV]?.trim();
+  if (!providerInstanceId) throw new Error("Managed MCP requires a server-assigned provider instance ID");
+  if (rawServers.length > 64_000 || rawHosts.length > 16_000) throw new Error("Managed MCP configuration exceeds its size limit");
+  const servers = parseJsonArray<SubpolarMcpServerConfig>(environment, MCP_SERVERS_ENV);
+  const allowedHosts = parseJsonArray<string>(environment, MCP_ALLOWED_HOSTS_ENV);
+  const ids = new Set<string>();
+  for (const server of servers) {
+    if (!server || typeof server !== "object" || typeof server.id !== "string" || ids.has(server.id)) {
+      throw new Error("Managed MCP server configuration contains a missing or duplicate server ID");
+    }
+    ids.add(server.id);
+  }
+  const registry = registryFactory({ providerInstanceId, allowedHosts });
+  const connections = new Map<string, SubpolarMcpConnection>();
+  const definitions: ToolDefinition[] = [];
+  const toolsById = new Map<string, { readonly serverId: string; readonly name: string }>();
+  try {
+    for (const server of servers) {
+      const connection = await registry.connect(server);
+      connections.set(server.id, connection);
+      for (const tool of await connection.listTools()) {
+        const id = canonicalizeToolId(tool.toolId, { adapter: "mcp" });
+        if (toolsById.has(id)) throw new Error(`Managed MCP servers expose a duplicate tool ID: ${id}`);
+        toolsById.set(id, { serverId: server.id, name: tool.name });
+        definitions.push({
+          id,
+          namespace: tool.namespace ?? server.namespace ?? server.id,
+          description: tool.description,
+          inputSchema: tool.inputSchema as ToolDefinition["inputSchema"],
+          enabled: true,
+          risk: "high",
+          metadata: { serverId: server.id },
+        });
+      }
+    }
+  } catch (error) {
+    await registry.close().catch(() => undefined);
+    throw error;
+  }
+  const executeTool: ToolExecutor = async (call) => {
+    const target = toolsById.get(call.toolId);
+    const connection = target ? connections.get(target.serverId) : undefined;
+    if (!target || !connection) {
+      return { ok: false, error: { code: "MCP_TOOL_UNAVAILABLE", message: "The configured MCP tool is unavailable" } };
+    }
+    try {
+      return { ok: true, value: await connection.callTool(target.name, call.input) };
+    } catch {
+      return { ok: false, error: { code: "MCP_TOOL_FAILED", message: "The configured MCP tool call failed" } };
+    }
+  };
+  return {
+    toolDefinitions: definitions,
+    executeTool,
+    close: () => registry.close(),
+  };
 }
 
 function makeDefinition(): ToolDefinition {
   return {
     id: "internal/worker/execute",
-    adapter: "internal",
     namespace: "worker",
-    name: "execute",
     description: "Run an approved command in this isolated worktree and return its output.",
     inputSchema: {
       type: "object",
@@ -32,8 +112,9 @@ function makeDefinition(): ToolDefinition {
       },
       required: ["command"],
       additionalProperties: false,
-    },
+    } as ToolDefinition["inputSchema"],
     enabled: true,
+    risk: "high",
   };
 }
 
@@ -41,18 +122,15 @@ function makeT3McpDefinitions(): readonly ToolDefinition[] {
   return [
     {
       id: "internal/t3-mcp/list-tools",
-      adapter: "internal",
       namespace: "t3",
-      name: "list_mcp_tools",
       description: "List the T3 Code MCP tools authorized for this provider session. Use the exact returned name with call_mcp_tool.",
       inputSchema: { type: "object", properties: {}, additionalProperties: false },
       enabled: true,
+      risk: "high",
     },
     {
       id: "internal/t3-mcp/call-tool",
-      adapter: "internal",
       namespace: "t3",
-      name: "call_mcp_tool",
       description: "Call one exact T3 Code MCP tool authorized for this provider session, using its returned name and input arguments.",
       inputSchema: {
         type: "object",
@@ -62,8 +140,9 @@ function makeT3McpDefinitions(): readonly ToolDefinition[] {
         },
         required: ["name", "arguments"],
         additionalProperties: false,
-      },
+      } as ToolDefinition["inputSchema"],
       enabled: true,
+      risk: "high",
     },
   ];
 }
@@ -217,7 +296,7 @@ async function executeLocal(
 export function createWorkerExecutionOptions(
   environment: NodeJS.ProcessEnv,
   dependencies: WorkerExecutionDependencies = {},
-): Pick<SubpolarAcpOptions, "principalId" | "toolDefinitions" | "executeTool" | "sessionCwd"> {
+): Pick<SubpolarAcpOptions, "principalId" | "toolDefinitions" | "executeTool" | "sessionCwd" | "initializeTools"> {
   if (environment.SUBPOLAR_ACP_WORKER_MODE !== "1") return {};
   const definition = makeDefinition();
   const t3McpDefinitions = environment.SUBPOLAR_T3_MCP_BRIDGE === "1"
@@ -229,5 +308,6 @@ export function createWorkerExecutionOptions(
     sessionCwd: () => dependencies.workspaceRoot ?? process.cwd(),
     toolDefinitions: [definition, ...t3McpDefinitions],
     executeTool,
+    initializeTools: () => initializeWorkerMcpTools(environment, dependencies.createMcpRegistry),
   };
 }

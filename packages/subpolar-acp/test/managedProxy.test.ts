@@ -8,16 +8,52 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import type { EnvironmentManagedSessionRequest, EnvironmentManager, EnvironmentRequest } from "@subpolar/environments";
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
-import { layerManagedAcpProxy } from "../src/managedProxy.ts";
+import { layerManagedAcpProxy, makeManagedAcpManager } from "../src/managedProxy.ts";
 
 const baseEnvironment = {
   SUBPOLAR_MANAGER_URL: "http://subpolar-manager:8787",
-  SUBPOLAR_MANAGER_TOKEN: "managed-proxy-test-token-with-more-than-thirty-two-characters",
+  SUBPOLAR_MANAGER_INSTANCE_TOKEN: "managed-proxy-instance-token-with-more-than-thirty-two-characters",
+  SUBPOLAR_OWNER_ID: "t3-instance-test",
   SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP: "true",
   SUBPOLAR_STORAGE_ROOT: "/workspaces",
   SUBPOLAR_ACP_WORKER_COMMAND: '["/usr/local/bin/subpolar-acp-worker"]',
 };
 const encoder = new TextEncoder();
+
+test("managed ACP refuses the shared admin token as an instance credential", () => {
+  expect(() => makeManagedAcpManager({ environment: {
+    SUBPOLAR_MANAGER_URL: baseEnvironment.SUBPOLAR_MANAGER_URL,
+    SUBPOLAR_MANAGER_TOKEN: "shared-admin-token-that-must-not-be-used-for-provider-sessions",
+  } })).toThrow(/SUBPOLAR_MANAGER_INSTANCE_TOKEN/);
+  expect(() => makeManagedAcpManager({ environment: {
+    SUBPOLAR_MANAGER_URL: baseEnvironment.SUBPOLAR_MANAGER_URL,
+    SUBPOLAR_MANAGER_INSTANCE_TOKEN: "short",
+  } })).toThrow(/at least 32/);
+});
+
+test("managed ACP sends the instance credential to the manager", async () => {
+  let authorization: string | null = null;
+  const manager = makeManagedAcpManager({
+    environment: baseEnvironment,
+    fetch: (async (_input, init) => {
+      authorization = new Headers(init?.headers).get("authorization");
+      return Response.json({
+        id: "env-1",
+        ownerId: baseEnvironment.SUBPOLAR_OWNER_ID,
+        workspaceId: "ws_123",
+        storageRoot: baseEnvironment.SUBPOLAR_STORAGE_ROOT,
+        worktreePath: "/workspaces/project-a",
+      });
+    }) as typeof fetch,
+  });
+  await manager.identity({
+    ownerId: baseEnvironment.SUBPOLAR_OWNER_ID,
+    workspaceId: "ws_123",
+    storageRoot: baseEnvironment.SUBPOLAR_STORAGE_ROOT,
+    worktreePath: "/workspaces/project-a",
+  });
+  expect(authorization).toBe(`Bearer ${baseEnvironment.SUBPOLAR_MANAGER_INSTANCE_TOKEN}`);
+});
 
 function fakeManager(options: { failStart?: boolean; requestPermission?: boolean } = {}) {
   const calls: Array<{ method: string; request?: EnvironmentRequest; process?: EnvironmentManagedSessionRequest; command?: readonly string[]; sessionId?: string; data?: string }> = [];
@@ -180,7 +216,7 @@ test("managed proxy starts a worker for the requested worktree and forwards ACP 
     method: "start",
     command: ["/usr/local/bin/subpolar-acp-worker"],
     request: {
-      ownerId: "t3-installation",
+      ownerId: baseEnvironment.SUBPOLAR_OWNER_ID,
       storageRoot: "/workspaces",
       worktreePath: "/workspaces/project-a",
       workspaceId: expect.stringMatching(/^ws_[a-f0-9]{24}$/),
@@ -204,6 +240,63 @@ test("managed proxy starts a worker for the requested worktree and forwards ACP 
 
   await Effect.runPromise(Scope.close(scope, Exit.void));
   expect(fake.calls.some((call) => call.method === "terminate")).toBe(true);
+});
+
+test("managed proxy forwards only configured MCP credentials and the server-assigned instance identity", async () => {
+  const { stdio, input, output } = await Effect.runPromise(makeInMemoryStdio());
+  const scope = await Effect.runPromise(Scope.make());
+  const fake = fakeManager();
+  const mcpEnvironment = {
+    ...baseEnvironment,
+    SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
+    SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
+    SUBPOLAR_MCP_SERVERS: JSON.stringify([{
+      id: "issue-tracker",
+      url: "https://mcp.example.com/mcp",
+      headers: { Authorization: { env: "SUBPOLAR_MCP_HEADER_ISSUES" } },
+    }]),
+    SUBPOLAR_MCP_HEADER_ISSUES: "Bearer issue-secret",
+    UNRELATED_SECRET: "must-not-be-forwarded",
+  };
+  await Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
+    environment: mcpEnvironment,
+    manager: fake.manager,
+  }), scope));
+
+  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 2, info: { name: "t3", version: "1" }, capabilities: {} } }));
+  await readMessage(output, (message) => message.id === 1);
+  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/workspaces/project-a" } }));
+  await readMessage(output, (message) => message.id === 2);
+  expect(fake.calls[0]?.process?.environment).toMatchObject({
+    SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
+    SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
+    SUBPOLAR_MCP_SERVERS: mcpEnvironment.SUBPOLAR_MCP_SERVERS,
+    SUBPOLAR_MCP_HEADER_ISSUES: "Bearer issue-secret",
+  });
+  expect(fake.calls[0]?.process?.environment).not.toHaveProperty("UNRELATED_SECRET");
+  await Effect.runPromise(Scope.close(scope, Exit.void));
+});
+
+test("managed proxy rejects unscoped MCP configuration before starting a worker", async () => {
+  const { stdio, input, output } = await Effect.runPromise(makeInMemoryStdio());
+  const scope = await Effect.runPromise(Scope.make());
+  const fake = fakeManager();
+  await Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
+    environment: {
+      ...baseEnvironment,
+      SUBPOLAR_MCP_SERVERS: "[]",
+      SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
+    },
+    manager: fake.manager,
+  }), scope));
+
+  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 2, info: { name: "t3", version: "1" }, capabilities: {} } }));
+  await readMessage(output, (message) => message.id === 1);
+  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/workspaces/project-a" } }));
+  const response = await readMessage(output, (message) => message.id === 2);
+  expect(response.error).toBeDefined();
+  expect(fake.calls.some((call) => call.method === "start")).toBe(false);
+  await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
 test("managed proxy keeps the T3 MCP bearer on the host and relays tools through the scoped MCP session", async () => {

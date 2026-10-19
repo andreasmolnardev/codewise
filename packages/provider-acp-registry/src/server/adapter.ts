@@ -28,6 +28,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { registerSubpolarCredentialExtension } from "./subpolarCredentials.ts";
 import { registerSubpolarModelEgressExtension } from "./subpolarModelEgress.ts";
+import { bindSubpolarProviderInstanceEnvironment } from "./subpolarInstanceEnvironment.ts";
 import {
   normalizeAcpRegistryCommands,
   normalizeAcpRegistryLiveConfiguration,
@@ -310,6 +311,17 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("AcpRegistryAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<AcpRegistrySettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
+      const processEnvironment = yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment);
+      // Subpolar instance credentials are configured per ACP provider. Bind the
+      // manager owner and MCP scope to T3's provider ID, never an environment value.
+      const configuredInstanceToken = input.environment?.find(
+        ({ name }) => name === "SUBPOLAR_MANAGER_INSTANCE_TOKEN",
+      )?.value;
+      const subpolarEnvironment = bindSubpolarProviderInstanceEnvironment(
+        processEnvironment,
+        input.instanceId,
+        configuredInstanceToken,
+      );
       const selfInvocation = yield* resolveSelfInvocation();
       const providerEventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
       const host = yield* ProviderHost.ProviderHost;
@@ -317,7 +329,7 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
       return yield* makeAcpRegistryAdapterV2({
         instanceId: input.instanceId,
         settings: { ...input.config, enabled: input.enabled },
-        environment: yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment),
+        environment: subpolarEnvironment,
         host,
         selfInvocation,
         nativeLogging: (threadId) =>

@@ -85,6 +85,7 @@ Set these values in `docker/.env` before enabling the profile:
 ```dotenv
 SUBPOLAR_MANAGER_URL=http://subpolar-manager:8787
 SUBPOLAR_MANAGER_TOKEN=<random secret of at least 32 characters>
+SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","stdio","execute"]}}
 SUBPOLAR_STORAGE_ROOT=/workspaces
 SUBPOLAR_DOCKER_HOST_STORAGE_ROOT=<volume Mountpoint from docker volume inspect>
 SUBPOLAR_DOCKER_GID=<numeric group that can access /var/run/docker.sock>
@@ -107,7 +108,15 @@ using the installed `subpolar-acp` executable or Bun with
 authenticated worker-process proxy. The worker image includes the ACP bridge,
 Pi SDK, and `/usr/local/bin/subpolar-acp-worker`; set
 `SUBPOLAR_ACP_WORKER_COMMAND` to the JSON argv array shown above. The manager
-token is passed only to the server process so the ACP bridge can authenticate.
+admin token is reserved for administrator CLI operations. Set
+`SUBPOLAR_MANAGER_INSTANCE_TOKEN` in the intended ACP provider instance's
+environment settings; do not put it in the gateway's Compose environment. The
+ACP bridge uses only that provider-instance token, which the manager checks
+against its server-assigned owner, storage root, and operation registry.
+Set the registry's `ownerId` to the configured ACP provider instance ID (for
+example, `subpolar_team_a`). When an instance token is configured, T3 binds
+`SUBPOLAR_OWNER_ID` and `SUBPOLAR_PROVIDER_INSTANCE_ID` to that server-assigned
+instance ID for the provider process.
 The worker image contains no gateway token, T3 state, account credentials, or
 Docker socket.
 

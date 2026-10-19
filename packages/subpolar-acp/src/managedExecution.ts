@@ -12,14 +12,17 @@ export function createManagedExecutionOptions(
   environment: NodeJS.ProcessEnv,
   fetcher?: typeof fetch,
 ): Pick<SubpolarAcpOptions, "principalId" | "toolDefinitions" | "executeTool"> {
-  const managerUrl = environment.SUBPOLAR_MANAGER_URL;
-  const managerToken = environment.SUBPOLAR_MANAGER_TOKEN;
-  const storageRoot = environment.SUBPOLAR_STORAGE_ROOT;
-  const ownerId = environment.SUBPOLAR_OWNER_ID ?? "t3-installation";
-  const configured = [managerUrl, managerToken, storageRoot].filter(Boolean).length;
+  const managerUrl = environment.SUBPOLAR_MANAGER_URL?.trim();
+  const managerToken = environment.SUBPOLAR_MANAGER_INSTANCE_TOKEN?.trim();
+  const storageRoot = environment.SUBPOLAR_STORAGE_ROOT?.trim();
+  const ownerId = environment.SUBPOLAR_OWNER_ID?.trim();
+  const configured = [managerUrl, managerToken, storageRoot, ownerId].filter(Boolean).length;
   if (configured === 0) return {};
-  if (configured !== 3) {
-    throw new Error("Managed ACP execution requires SUBPOLAR_MANAGER_URL, SUBPOLAR_MANAGER_TOKEN, and SUBPOLAR_STORAGE_ROOT");
+  if (configured !== 4) {
+    throw new Error("Managed ACP execution requires SUBPOLAR_MANAGER_URL, SUBPOLAR_MANAGER_INSTANCE_TOKEN, SUBPOLAR_STORAGE_ROOT, and SUBPOLAR_OWNER_ID");
+  }
+  if (managerToken!.length < 32 || /\s|\0/.test(managerToken!)) {
+    throw new Error("Managed ACP instance token must contain at least 32 non-whitespace characters");
   }
 
   const manager = createEnvironmentManagerHttpClient({
@@ -58,7 +61,7 @@ export function createManagedExecutionOptions(
     let capturedBytes = 0;
     let truncated = false;
     try {
-      const result = await manager.execute({ ownerId, workspaceId, storageRoot: storageRoot!, worktreePath }, input.command, {
+      const result = await manager.execute({ ownerId: ownerId!, workspaceId, storageRoot: storageRoot!, worktreePath }, input.command, {
         ...(input.cwd === undefined ? {} : { cwd: input.cwd }),
         ...(input.environment === undefined ? {} : { environment: input.environment }),
         ...(signal === undefined ? {} : { signal }),
@@ -81,5 +84,5 @@ export function createManagedExecutionOptions(
     }
   };
 
-  return { principalId: ownerId, toolDefinitions: [definition], executeTool };
+  return { principalId: ownerId!, toolDefinitions: [definition], executeTool };
 }

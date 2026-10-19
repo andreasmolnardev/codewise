@@ -375,3 +375,62 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
     yield* Scope.close(scope, Exit.void);
   }),
 );
+
+it.effect("registers initialized provider-instance MCP tools through the same ACP approval gateway", () =>
+  Effect.gen(function* () {
+    const { stdio, input, output } = yield* makeInMemoryStdio();
+    const scope = yield* Scope.make();
+    let closed = false;
+    let markExecuted!: () => void;
+    const executionFinished = new Promise<void>((resolve) => { markExecuted = resolve; });
+    yield* Layer.buildWithScope(layer(stdio, {
+      initializeTools: async () => ({
+        toolDefinitions: [{
+          id: "mcp/issues/search",
+          namespace: "issues",
+          description: "Search the issue tracker",
+          inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+          enabled: true,
+          risk: "high",
+        }],
+        executeTool: async (call) => {
+          assert.equal(call.toolId, "mcp/issues/search");
+          markExecuted();
+          return { ok: true, value: { content: [{ type: "text", text: "issue found" }] } };
+        },
+        close: async () => { closed = true; },
+      }),
+      executorFactory: async (_config, runtime) => ({
+        async execute() {
+          return runtime!.tools!.call({ callId: "mcp-call-1", toolId: "mcp/issues/search", input: { query: "regression" } });
+        },
+      }),
+    }), scope);
+
+    yield* send(input, initialize);
+    yield* readResponse(output, 1);
+    yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
+    const created = yield* readResponse(output, 2);
+    const sessionId = (created.result as { sessionId: string }).sessionId;
+    yield* send(input, request(3, "session/prompt", {
+      sessionId,
+      prompt: [{ type: "text", text: "Search issues" }],
+    }));
+    let responseReceived = false;
+    let permission: Record<string, unknown> | undefined;
+    while (!responseReceived || !permission) {
+      const message = yield* readJsonLine(output);
+      if (message.id === 3) responseReceived = true;
+      if (message.method === "session/request_permission") permission = message;
+    }
+    assert.equal((permission.params as { toolCall: { name: string } }).toolCall.name, "mcp/issues/search");
+    yield* send(input, {
+      jsonrpc: "2.0",
+      id: permission.id,
+      result: { outcome: { outcome: "selected", optionId: "allow-once" } },
+    });
+    yield* Effect.promise(() => executionFinished);
+    yield* Scope.close(scope, Exit.void);
+    assert.equal(closed, true);
+  }),
+);

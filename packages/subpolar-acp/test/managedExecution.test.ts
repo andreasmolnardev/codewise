@@ -4,7 +4,7 @@ import type { ExecutionContext, ToolCall } from "@subpolar/shared";
 
 const environment = {
   SUBPOLAR_MANAGER_URL: "http://subpolar-manager:8080",
-  SUBPOLAR_MANAGER_TOKEN: "managed-execution-test-token-with-more-than-thirty-two-characters",
+  SUBPOLAR_MANAGER_INSTANCE_TOKEN: "managed-execution-instance-token-with-more-than-thirty-two-characters",
   SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP: "true",
   SUBPOLAR_STORAGE_ROOT: "/workspaces",
   SUBPOLAR_OWNER_ID: "t3-installation-test",
@@ -12,7 +12,14 @@ const environment = {
 
 test("managed execution is absent when manager configuration is unset and rejects partial setup", () => {
   expect(createManagedExecutionOptions({})).toEqual({});
+  expect(createManagedExecutionOptions({ SUBPOLAR_MANAGER_TOKEN: "shared-admin-token-that-must-not-enable-provider-execution" })).toEqual({});
   expect(() => createManagedExecutionOptions({ SUBPOLAR_MANAGER_URL: environment.SUBPOLAR_MANAGER_URL })).toThrow(/requires SUBPOLAR_MANAGER_URL/);
+  expect(() => createManagedExecutionOptions({
+    SUBPOLAR_MANAGER_URL: environment.SUBPOLAR_MANAGER_URL,
+    SUBPOLAR_MANAGER_TOKEN: "shared-admin-token-that-must-not-enable-provider-execution",
+    SUBPOLAR_STORAGE_ROOT: environment.SUBPOLAR_STORAGE_ROOT,
+    SUBPOLAR_OWNER_ID: environment.SUBPOLAR_OWNER_ID,
+  })).toThrow(/SUBPOLAR_MANAGER_INSTANCE_TOKEN/);
 });
 
 test("managed execution routes only the approved argv tool through the manager client", async () => {
@@ -48,7 +55,7 @@ test("managed execution routes only the approved argv tool through the manager c
   });
   expect(seen).toEqual({
     url: "http://subpolar-manager:8080/v1/environments/execute",
-    authorization: `Bearer ${environment.SUBPOLAR_MANAGER_TOKEN}`,
+    authorization: `Bearer ${environment.SUBPOLAR_MANAGER_INSTANCE_TOKEN}`,
     body: {
       environment: {
         ownerId: environment.SUBPOLAR_OWNER_ID,

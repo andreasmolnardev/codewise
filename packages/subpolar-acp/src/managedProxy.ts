@@ -50,6 +50,42 @@ function workerEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined && SAFE_WORKER_ENVIRONMENT_KEYS.has(key)) result[key] = value;
   }
+  const configuredMcpServers = source.SUBPOLAR_MCP_SERVERS;
+  const configuredMcpHosts = source.SUBPOLAR_MCP_ALLOWED_HOSTS;
+  if (configuredMcpServers !== undefined || configuredMcpHosts !== undefined) {
+    const providerInstanceId = source.SUBPOLAR_PROVIDER_INSTANCE_ID?.trim();
+    if (!configuredMcpServers || !configuredMcpHosts || !providerInstanceId) {
+      throw new Error("Managed MCP requires server configuration, an approved hostname allowlist, and a server-assigned provider instance ID");
+    }
+    if (configuredMcpServers.length > 64_000 || configuredMcpHosts.length > 16_000) {
+      throw new Error("Managed MCP configuration exceeds its size limit");
+    }
+    let servers: unknown;
+    try { servers = JSON.parse(configuredMcpServers); } catch { throw new Error("SUBPOLAR_MCP_SERVERS must be valid JSON"); }
+    if (!Array.isArray(servers)) throw new Error("SUBPOLAR_MCP_SERVERS must be a JSON array");
+    const requiredHeaderVariables = new Set<string>();
+    for (const server of servers) {
+      if (!server || typeof server !== "object" || !server.headers || typeof server.headers !== "object" || Array.isArray(server.headers)) continue;
+      for (const value of Object.values(server.headers as Record<string, unknown>)) {
+        if (!value || typeof value !== "object" || typeof (value as { env?: unknown }).env !== "string") continue;
+        const name = (value as { env: string }).env;
+        if (!/^SUBPOLAR_MCP_HEADER_[A-Za-z0-9_]{1,120}$/.test(name)) {
+          throw new Error("Managed MCP header credentials must use SUBPOLAR_MCP_HEADER_ environment variables");
+        }
+        requiredHeaderVariables.add(name);
+      }
+    }
+    result.SUBPOLAR_MCP_SERVERS = configuredMcpServers;
+    result.SUBPOLAR_MCP_ALLOWED_HOSTS = configuredMcpHosts;
+    result.SUBPOLAR_PROVIDER_INSTANCE_ID = providerInstanceId;
+    for (const name of requiredHeaderVariables) {
+      const value = source[name];
+      if (value === undefined || value.includes("\0") || value.length > 16_384) {
+        throw new Error(`Managed MCP credential ${name} is missing or invalid`);
+      }
+      result[name] = value;
+    }
+  }
   return result;
 }
 
@@ -70,9 +106,11 @@ function environmentFor(cwd: string, environment: NodeJS.ProcessEnv): Environmen
   if (!path.isAbsolute(cwd)) throw new Error("Managed ACP requires an absolute session cwd");
   const storageRoot = environment.SUBPOLAR_STORAGE_ROOT?.trim();
   if (!storageRoot || !path.isAbsolute(storageRoot)) throw new Error("Managed ACP storage root is not configured");
+  const ownerId = environment.SUBPOLAR_OWNER_ID?.trim();
+  if (!ownerId) throw new Error("Managed ACP owner is not configured for this provider instance");
   const worktreePath = path.resolve(cwd);
   return {
-    ownerId: environment.SUBPOLAR_OWNER_ID?.trim() || "t3-installation",
+    ownerId,
     workspaceId: `ws_${createHash("sha256").update(worktreePath).digest("hex").slice(0, 24)}`,
     storageRoot,
     worktreePath,
@@ -102,8 +140,11 @@ function t3McpConnection(servers: readonly AcpSchema.McpServer[] | undefined): T
 
 export function makeManagedAcpManager(options: ManagedAcpProxyOptions): EnvironmentManager {
   if (options.manager) return options.manager;
-  const { SUBPOLAR_MANAGER_URL: baseUrl, SUBPOLAR_MANAGER_TOKEN: token } = options.environment;
-  if (!baseUrl || !token) throw new Error("Managed ACP requires SUBPOLAR_MANAGER_URL and SUBPOLAR_MANAGER_TOKEN");
+  const { SUBPOLAR_MANAGER_URL: baseUrl, SUBPOLAR_MANAGER_INSTANCE_TOKEN: token } = options.environment;
+  if (!baseUrl || !token) throw new Error("Managed ACP requires SUBPOLAR_MANAGER_URL and SUBPOLAR_MANAGER_INSTANCE_TOKEN");
+  if (token.length < 32 || /\s|\0/.test(token)) {
+    throw new Error("Managed ACP instance token must contain at least 32 non-whitespace characters");
+  }
   return createEnvironmentManagerHttpClient({
     baseUrl,
     token,
