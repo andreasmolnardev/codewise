@@ -6,6 +6,14 @@ import {
   type EnvironmentRequest,
 } from "@subpolar/environments";
 import { createEnvironmentManagerHttpClient } from "@subpolar/environments/manager-client";
+import { canonicalizeToolId } from "@subpolar/tools";
+import {
+  createProviderMcpRegistry,
+  type ProviderMcpRegistryOptions,
+  type SubpolarMcpConnection,
+  type SubpolarMcpServerConfig,
+} from "@subpolar/mcp";
+import type { ToolDefinition } from "@subpolar/shared";
 import * as AcpAgent from "effect-acp/agent";
 import * as AcpClient from "effect-acp/client";
 import * as AcpError from "effect-acp/errors";
@@ -20,11 +28,13 @@ import * as Stdio from "effect/Stdio";
 import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 import { callT3Mcp, type T3McpBridgeConnection } from "./t3McpBridge.ts";
+import { MCP_TOOL_CATALOG_ENV } from "./workerExecution.ts";
 
 export interface ManagedAcpProxyOptions {
   readonly environment: NodeJS.ProcessEnv;
   readonly manager?: EnvironmentManager;
   readonly fetch?: typeof fetch;
+  readonly createMcpRegistry?: (options: ProviderMcpRegistryOptions) => ReturnType<typeof createProviderMcpRegistry>;
 }
 
 interface WorkerSession {
@@ -37,7 +47,7 @@ interface WorkerSession {
 
 const SAFE_WORKER_ENVIRONMENT_KEYS = new Set(["COLORTERM", "EDITOR", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TZ"]);
 
-function workerEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
+function workerEnvironment(source: NodeJS.ProcessEnv, mcpTools: readonly ToolDefinition[] = []): Record<string, string> {
   const result: Record<string, string> = {
     HOME: "/tmp/home",
     PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -50,43 +60,81 @@ function workerEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   for (const [key, value] of Object.entries(source)) {
     if (value !== undefined && SAFE_WORKER_ENVIRONMENT_KEYS.has(key)) result[key] = value;
   }
-  const configuredMcpServers = source.SUBPOLAR_MCP_SERVERS;
-  const configuredMcpHosts = source.SUBPOLAR_MCP_ALLOWED_HOSTS;
-  if (configuredMcpServers !== undefined || configuredMcpHosts !== undefined) {
-    const providerInstanceId = source.SUBPOLAR_PROVIDER_INSTANCE_ID?.trim();
-    if (!configuredMcpServers || !configuredMcpHosts || !providerInstanceId) {
-      throw new Error("Managed MCP requires server configuration, an approved hostname allowlist, and a server-assigned provider instance ID");
-    }
-    if (configuredMcpServers.length > 64_000 || configuredMcpHosts.length > 16_000) {
-      throw new Error("Managed MCP configuration exceeds its size limit");
-    }
-    let servers: unknown;
-    try { servers = JSON.parse(configuredMcpServers); } catch { throw new Error("SUBPOLAR_MCP_SERVERS must be valid JSON"); }
-    if (!Array.isArray(servers)) throw new Error("SUBPOLAR_MCP_SERVERS must be a JSON array");
-    const requiredHeaderVariables = new Set<string>();
-    for (const server of servers) {
-      if (!server || typeof server !== "object" || !server.headers || typeof server.headers !== "object" || Array.isArray(server.headers)) continue;
-      for (const value of Object.values(server.headers as Record<string, unknown>)) {
-        if (!value || typeof value !== "object" || typeof (value as { env?: unknown }).env !== "string") continue;
-        const name = (value as { env: string }).env;
-        if (!/^SUBPOLAR_MCP_HEADER_[A-Za-z0-9_]{1,120}$/.test(name)) {
-          throw new Error("Managed MCP header credentials must use SUBPOLAR_MCP_HEADER_ environment variables");
-        }
-        requiredHeaderVariables.add(name);
-      }
-    }
-    result.SUBPOLAR_MCP_SERVERS = configuredMcpServers;
-    result.SUBPOLAR_MCP_ALLOWED_HOSTS = configuredMcpHosts;
-    result.SUBPOLAR_PROVIDER_INSTANCE_ID = providerInstanceId;
-    for (const name of requiredHeaderVariables) {
-      const value = source[name];
-      if (value === undefined || value.includes("\0") || value.length > 16_384) {
-        throw new Error(`Managed MCP credential ${name} is missing or invalid`);
-      }
-      result[name] = value;
-    }
+  if (mcpTools.length > 0) {
+    const catalog = JSON.stringify(mcpTools);
+    if (Buffer.byteLength(catalog) > 64_000) throw new Error("Managed MCP tool catalog exceeds its size limit");
+    result[MCP_TOOL_CATALOG_ENV] = catalog;
   }
   return result;
+}
+
+function jsonArray<T>(environment: NodeJS.ProcessEnv, key: string): T[] {
+  let value: unknown;
+  try { value = JSON.parse(environment[key] ?? ""); } catch { throw new Error(`${key} must be valid JSON`); }
+  if (!Array.isArray(value)) throw new Error(`${key} must be a JSON array`);
+  return value as T[];
+}
+
+async function createManagedMcpBroker(
+  environment: NodeJS.ProcessEnv,
+  registryFactory: NonNullable<ManagedAcpProxyOptions["createMcpRegistry"]> = createProviderMcpRegistry,
+) {
+  const rawServers = environment.SUBPOLAR_MCP_SERVERS;
+  const rawHosts = environment.SUBPOLAR_MCP_ALLOWED_HOSTS;
+  if (rawServers === undefined && rawHosts === undefined) return undefined;
+  if (!rawServers || !rawHosts) throw new Error("Managed MCP requires server configuration and an approved hostname allowlist");
+  const providerInstanceId = environment.SUBPOLAR_PROVIDER_INSTANCE_ID?.trim();
+  if (!providerInstanceId) throw new Error("Managed MCP requires a server-assigned provider instance ID");
+  if (rawServers.length > 64_000 || rawHosts.length > 16_000) throw new Error("Managed MCP configuration exceeds its size limit");
+  const servers = jsonArray<SubpolarMcpServerConfig>(environment, "SUBPOLAR_MCP_SERVERS");
+  const allowedHosts = jsonArray<string>(environment, "SUBPOLAR_MCP_ALLOWED_HOSTS");
+  const ids = new Set<string>();
+  for (const server of servers) {
+    if (!server || typeof server !== "object" || typeof server.id !== "string" || ids.has(server.id)) {
+      throw new Error("Managed MCP server configuration contains a missing or duplicate server ID");
+    }
+    ids.add(server.id);
+    for (const header of Object.values(server.headers ?? {})) {
+      if (!header || !/^SUBPOLAR_MCP_HEADER_[A-Za-z0-9_]{1,120}$/.test(header.env)) {
+        throw new Error("Managed MCP header credentials must use SUBPOLAR_MCP_HEADER_ environment variables");
+      }
+      const credential = environment[header.env];
+      if (credential === undefined || credential.includes("\0") || credential.length > 16_384) {
+        throw new Error(`Managed MCP credential ${header.env} is missing or invalid`);
+      }
+    }
+  }
+  const registry = registryFactory({ providerInstanceId, allowedHosts });
+  const tools = new Map<string, { readonly connection: SubpolarMcpConnection; readonly name: string }>();
+  const definitions: ToolDefinition[] = [];
+  try {
+    for (const server of servers) {
+      const connection = await registry.connect(server);
+      for (const tool of await connection.listTools()) {
+        const id = canonicalizeToolId(tool.toolId, { adapter: "mcp" });
+        if (tools.has(id)) throw new Error(`Managed MCP servers expose a duplicate tool ID: ${id}`);
+        tools.set(id, { connection, name: tool.name });
+        definitions.push({
+          id,
+          namespace: tool.namespace ?? server.namespace ?? server.id,
+          description: tool.description,
+          inputSchema: tool.inputSchema as ToolDefinition["inputSchema"],
+          enabled: true,
+          risk: "high",
+          metadata: { serverId: server.id },
+        });
+      }
+    }
+  } catch (error) {
+    await registry.close().catch(() => undefined);
+    throw error;
+  }
+  const call = async (toolId: string, input: unknown) => {
+    const tool = tools.get(toolId);
+    if (!tool) throw new Error("The managed MCP tool is not in the provider-instance catalog");
+    return tool.connection.callTool(tool.name, input);
+  };
+  return { definitions, call, close: () => registry.close() };
 }
 
 function parseCommand(environment: NodeJS.ProcessEnv): readonly string[] {
@@ -153,6 +201,18 @@ export function makeManagedAcpManager(options: ManagedAcpProxyOptions): Environm
   });
 }
 
+function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason ?? new Error("MCP request was cancelled"));
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new Error("MCP request was cancelled"));
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => { signal.removeEventListener("abort", abort); resolve(value); },
+      (error) => { signal.removeEventListener("abort", abort); reject(error); },
+    );
+  });
+}
+
 const requestError = (error: unknown) => AcpError.AcpRequestError.internalError(
   "Managed Subpolar worker failed",
   undefined,
@@ -166,8 +226,10 @@ function makeManagedAcpProxy(stdio: Stdio.Stdio, options: ManagedAcpProxyOptions
     const environment = options.environment;
     const command = parseCommand(environment);
     const manager = makeManagedAcpManager(options);
+    const mcpBroker = yield* Effect.promise(() => createManagedMcpBroker(environment, options.createMcpRegistry));
+    if (mcpBroker) yield* Effect.addFinalizer(() => Effect.promise(() => mcpBroker.close()));
     const workers = new Map<string, WorkerSession>();
-    const activeT3McpRequests = new Map<string, AbortController>();
+    const activeMcpRequests = new Map<string, AbortController>();
     let initializeRequest: AcpSchema.InitializeRequest | undefined;
 
     const getWorker = (sessionId: string) => {
@@ -213,7 +275,7 @@ function makeManagedAcpProxy(stdio: Stdio.Stdio, options: ManagedAcpProxyOptions
       if (!initializeRequest) throw new Error("ACP initialize must be called before session setup");
       const target = environmentFor(request.cwd, environment);
       const t3Mcp = t3McpConnection(request.mcpServers);
-      const workerEnv = workerEnvironment(environment);
+      const workerEnv = workerEnvironment(environment, mcpBroker?.definitions);
       if (t3Mcp) workerEnv.SUBPOLAR_T3_MCP_BRIDGE = "1";
       const started = await manager.startManagedSession(target, command, {
         cwd: ".",
@@ -296,47 +358,51 @@ function makeManagedAcpProxy(stdio: Stdio.Stdio, options: ManagedAcpProxyOptions
           agent.client.elicitationComplete(notification).pipe(Effect.mapError(requestError)),
         ));
         await Effect.runPromise(workerClient.handleUnknownExtRequest((method, payload) =>
-          method === "subpolar/t3_mcp"
-              ? Effect.tryPromise({
-                  try: async (signal) => {
-                    const bridgeRequest = payload as { sessionId?: unknown; requestId?: unknown; operation?: unknown; name?: unknown; arguments?: unknown };
-                    if (bridgeRequest.sessionId !== nativeSessionId || t3Mcp === undefined) {
-                      throw new Error("The T3 MCP session is unavailable");
+          method === "subpolar/t3_mcp" || method === "subpolar/mcp"
+            ? Effect.tryPromise({
+                try: async (signal) => {
+                  const bridgeRequest = payload as { sessionId?: unknown; requestId?: unknown; operation?: unknown; name?: unknown; toolId?: unknown; arguments?: unknown };
+                  const isT3Mcp = method === "subpolar/t3_mcp";
+                  if (bridgeRequest.sessionId !== nativeSessionId || (isT3Mcp ? t3Mcp === undefined : mcpBroker === undefined)) {
+                    throw new Error("The managed MCP session is unavailable");
+                  }
+                  if (typeof bridgeRequest.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(bridgeRequest.requestId)) {
+                    throw new Error("The managed MCP request ID is invalid");
+                  }
+                  const requestKey = `${nativeSessionId}:${bridgeRequest.requestId}`;
+                  if (activeMcpRequests.has(requestKey)) throw new Error("The managed MCP request ID is already active");
+                  const requestController = new AbortController();
+                  activeMcpRequests.set(requestKey, requestController);
+                  try {
+                    const requestSignal = AbortSignal.any([signal, requestController.signal]);
+                    if (isT3Mcp && bridgeRequest.operation === "list_tools") {
+                      return await callT3Mcp(t3Mcp!, "tools/list", {}, options.fetch, requestSignal);
                     }
-                    if (typeof bridgeRequest.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(bridgeRequest.requestId)) {
-                      throw new Error("The T3 MCP request ID is invalid");
+                    if (isT3Mcp && bridgeRequest.operation === "call_tool" && typeof bridgeRequest.name === "string" && bridgeRequest.name.length > 0 &&
+                        bridgeRequest.arguments !== null && typeof bridgeRequest.arguments === "object" && !Array.isArray(bridgeRequest.arguments)) {
+                      return await callT3Mcp(t3Mcp!, "tools/call", { name: bridgeRequest.name, arguments: bridgeRequest.arguments as Record<string, unknown> }, options.fetch, requestSignal);
                     }
-                    const requestKey = `${nativeSessionId}:${bridgeRequest.requestId}`;
-                    if (activeT3McpRequests.has(requestKey)) throw new Error("The T3 MCP request ID is already active");
-                    const requestController = new AbortController();
-                    activeT3McpRequests.set(requestKey, requestController);
-                    try {
-                      const requestSignal = AbortSignal.any([signal, requestController.signal]);
-                      if (bridgeRequest.operation === "list_tools") {
-                        return await callT3Mcp(t3Mcp, "tools/list", {}, options.fetch, requestSignal);
-                      }
-                      if (bridgeRequest.operation === "call_tool" && typeof bridgeRequest.name === "string" && bridgeRequest.name.length > 0 &&
-                          bridgeRequest.arguments !== null && typeof bridgeRequest.arguments === "object" && !Array.isArray(bridgeRequest.arguments)) {
-                        return await callT3Mcp(t3Mcp, "tools/call", { name: bridgeRequest.name, arguments: bridgeRequest.arguments as Record<string, unknown> }, options.fetch, requestSignal);
-                      }
-                      throw new Error("Invalid T3 MCP bridge request");
-                    } finally {
-                      activeT3McpRequests.delete(requestKey);
+                    if (!isT3Mcp && typeof bridgeRequest.toolId === "string" && bridgeRequest.toolId.startsWith("mcp/") &&
+                        bridgeRequest.arguments !== null && typeof bridgeRequest.arguments === "object" && !Array.isArray(bridgeRequest.arguments)) {
+                      return await waitForAbort(mcpBroker!.call(bridgeRequest.toolId, bridgeRequest.arguments), requestSignal);
                     }
-                  },
-                  catch: requestError,
-                })
-            :
-          agent.client.extRequest(method, payload).pipe(Effect.mapError(requestError)),
+                    throw new Error("Invalid managed MCP bridge request");
+                  } finally {
+                    activeMcpRequests.delete(requestKey);
+                  }
+                },
+                catch: requestError,
+              })
+            : agent.client.extRequest(method, payload).pipe(Effect.mapError(requestError)),
         ));
         await Effect.runPromise(workerClient.handleUnknownExtNotification((method, payload) => {
           if (method === "subpolar/cancel") {
             const cancelRequest = payload as { sessionId?: unknown; requestId?: unknown };
             if (cancelRequest.sessionId !== nativeSessionId || typeof cancelRequest.requestId !== "string" || !/^[0-9a-f-]{36}$/i.test(cancelRequest.requestId)) return Effect.void;
             const requestKey = `${nativeSessionId}:${cancelRequest.requestId}`;
-            const activeRequest = activeT3McpRequests.get(requestKey);
+            const activeRequest = activeMcpRequests.get(requestKey);
             if (activeRequest) {
-              activeRequest.abort(new Error("T3 MCP request was cancelled"));
+              activeRequest.abort(new Error("Managed MCP request was cancelled"));
               return Effect.void;
             }
             return agent.client.extNotification(method, payload).pipe(Effect.mapError(requestError));

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { RuntimeContextPort } from "@subpolar/shared";
@@ -82,18 +82,74 @@ describe("SubpolarRuntimeHost", () => {
       const session = first.createSession(undefined, "stable-session");
       expect((await first.prompt(session.sessionId, "hello")).state).toBe("completed");
 
-      const ledgerFile = path.join(runtimeDataDir, "subpolar-runtime-host.json");
-      const beforeRestart = JSON.parse(readFileSync(ledgerFile, "utf8"));
-      expect(beforeRestart.sessions["stable-session"].piSessionId).toBe("stable-session");
-      expect(beforeRestart.runs["run-done"].state).toBe("completed");
-      beforeRestart.runs["abandoned-run"] = { runId: "abandoned-run", sessionId: "stable-session", state: "running", updatedAt: "old" };
-      writeFileSync(ledgerFile, JSON.stringify(beforeRestart));
+      const sessionFile = path.join(runtimeDataDir, "subpolar-runtime-host", "sessions", `${Buffer.from("stable-session").toString("hex")}.json`);
+      const runFile = path.join(runtimeDataDir, "subpolar-runtime-host", "runs", `${Buffer.from("run-done").toString("hex")}.json`);
+      expect(JSON.parse(readFileSync(sessionFile, "utf8")).piSessionId).toBe("stable-session");
+      expect(JSON.parse(readFileSync(runFile, "utf8")).state).toBe("completed");
+      const abandonedFile = path.join(runtimeDataDir, "subpolar-runtime-host", "runs", `${Buffer.from("abandoned-run").toString("hex")}.json`);
+      writeFileSync(abandonedFile, JSON.stringify({ version: 1, runId: "abandoned-run", sessionId: "stable-session", state: "running", updatedAt: "old", workerPid: 99999999 }));
 
       const restarted = createSubpolarRuntimeHost({ context, gateway, piConfig: { runtimeDataDir }, piFactory: factory });
       expect(restarted.createSession(undefined, "stable-session").capabilities.supports["session.resume"]).toBe(true);
-      const afterRestart = JSON.parse(readFileSync(ledgerFile, "utf8"));
-      expect(afterRestart.runs["abandoned-run"].state).toBe("unknown");
-      expect(afterRestart.runs["run-done"].state).toBe("completed");
+      expect(JSON.parse(readFileSync(abandonedFile, "utf8")).state).toBe("unknown");
+      expect(JSON.parse(readFileSync(runFile, "utf8")).state).toBe("completed");
+    } finally {
+      rmSync(runtimeDataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("rejects session principal changes, including absent-to-present principals", () => {
+    const runtimeDataDir = mkdtempSync(path.join(os.tmpdir(), "subpolar-principal-"));
+    try {
+      const context: RuntimeContextPort = { async load(request) { return { requestId: request.requestId, runId: request.runId, sessionId: request.sessionId, principal: request.principal ?? { id: "local-user", kind: "local" } }; } };
+      const gateway = createPolicyGateway({ execute: async () => ({ ok: false, status: "denied" }) });
+      const factory = Object.assign(() => ({ async execute() { return "ok"; } }), { supportsPersistentSessions: true as const });
+      const host = createSubpolarRuntimeHost({ context, gateway, piConfig: { runtimeDataDir }, piFactory: factory });
+      const user = { id: "user-1", kind: "user" } as const;
+      host.createSession(user, "owned");
+      expect(() => host.createSession({ id: "user-2", kind: "user" }, "owned")).toThrow("different principal");
+      expect(() => host.restoreSession("owned", { id: "user-2", kind: "user" })).toThrow("different principal");
+      host.createSession(undefined, "anonymous");
+      expect(() => host.createSession(user, "anonymous")).toThrow("different principal");
+      expect(() => host.restoreSession("anonymous", user)).toThrow("different principal");
+    } finally {
+      rmSync(runtimeDataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("preserves corrupt persisted session records instead of replacing them", () => {
+    const runtimeDataDir = mkdtempSync(path.join(os.tmpdir(), "subpolar-corrupt-"));
+    try {
+      const context: RuntimeContextPort = { async load(request) { return { requestId: request.requestId, runId: request.runId, sessionId: request.sessionId, principal: request.principal ?? { id: "local-user", kind: "local" } }; } };
+      const gateway = createPolicyGateway({ execute: async () => ({ ok: false, status: "denied" }) });
+      const factory = Object.assign(() => ({ async execute() { return "ok"; } }), { supportsPersistentSessions: true as const });
+      const host = createSubpolarRuntimeHost({ context, gateway, piConfig: { runtimeDataDir }, piFactory: factory });
+      const file = path.join(runtimeDataDir, "subpolar-runtime-host", "sessions", `${Buffer.from("broken").toString("hex")}.json`);
+      mkdirSync(path.dirname(file), { recursive: true });
+      writeFileSync(file, "{broken");
+      expect(() => host.createSession(undefined, "broken")).toThrow("corrupt");
+      expect(readFileSync(file, "utf8")).toBe("{broken");
+    } finally {
+      rmSync(runtimeDataDir, { recursive: true, force: true });
+    }
+  });
+
+  test("two hosts sharing runtime storage retain both hosts' session and run records", async () => {
+    const runtimeDataDir = mkdtempSync(path.join(os.tmpdir(), "subpolar-shared-"));
+    try {
+      const context: RuntimeContextPort = { async load(request) { return { requestId: request.requestId, runId: request.runId, sessionId: request.sessionId, principal: request.principal ?? { id: "local-user", kind: "local" } }; } };
+      const gateway = createPolicyGateway({ execute: async () => ({ ok: false, status: "denied" }) });
+      const factory = Object.assign(() => ({ async execute() { return "ok"; } }), { supportsPersistentSessions: true as const });
+      const first = createSubpolarRuntimeHost({ context, gateway, piConfig: { runtimeDataDir }, piFactory: factory, createId: () => "first-run" });
+      const second = createSubpolarRuntimeHost({ context, gateway, piConfig: { runtimeDataDir }, piFactory: factory, createId: () => "second-run" });
+      first.createSession(undefined, "first-session");
+      second.createSession(undefined, "second-session");
+      await Promise.all([first.prompt("first-session", "one"), second.prompt("second-session", "two")]);
+      const sessionsDir = path.join(runtimeDataDir, "subpolar-runtime-host", "sessions");
+      const runsDir = path.join(runtimeDataDir, "subpolar-runtime-host", "runs");
+      expect(readdirSync(sessionsDir).sort()).toEqual(["66697273742d73657373696f6e.json", "7365636f6e642d73657373696f6e.json"]);
+      expect(JSON.parse(readFileSync(path.join(runsDir, `${Buffer.from("first-run").toString("hex")}.json`), "utf8")).state).toBe("completed");
+      expect(JSON.parse(readFileSync(path.join(runsDir, `${Buffer.from("second-run").toString("hex")}.json`), "utf8")).state).toBe("completed");
     } finally {
       rmSync(runtimeDataDir, { recursive: true, force: true });
     }

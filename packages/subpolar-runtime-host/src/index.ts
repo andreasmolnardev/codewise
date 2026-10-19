@@ -4,7 +4,7 @@ import type {
   RunEventSink,
   StatelessRunResult,
 } from "@subpolar/shared";
-import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { createStatelessSubpolarRuntime, type ToolGateway } from "@subpolar/runtime";
 import {
@@ -56,15 +56,44 @@ interface SessionState {
   activeRun?: Promise<StatelessRunResult>;
 }
 
-type StoredRun = { runId: string; sessionId: string; state: string; updatedAt: string };
-type HostLedger = { version: 1; sessions: Record<string, { piSessionId: string; principal?: Principal }>; runs: Record<string, StoredRun> };
+type StoredSession = { version: 1; sessionId: string; piSessionId: string; principal?: Principal; closed?: boolean };
+type StoredRun = { version: 1; runId: string; sessionId: string; state: string; updatedAt: string; workerPid: number };
 
-function readLedger(file: string): HostLedger {
-  try {
-    const value = JSON.parse(readFileSync(file, "utf8")) as HostLedger;
-    if (value.version === 1 && value.sessions && value.runs) return value;
-  } catch { /* A missing or unreadable ledger starts empty. */ }
-  return { version: 1, sessions: {}, runs: {} };
+function samePrincipal(left: Principal | undefined, right: Principal | undefined): boolean {
+  return left?.id === right?.id && left?.kind === right?.kind;
+}
+
+function readRecord<T extends { version: number }>(file: string): T | undefined {
+  let raw: string;
+  try { raw = readFileSync(file, "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+  let value: T;
+  try { value = JSON.parse(raw) as T; }
+  catch { throw new Error(`Persistent runtime record is corrupt: ${file}`); }
+  if (!value || typeof value !== "object" || value.version !== 1) {
+    throw new Error(`Unsupported or invalid persistent runtime record: ${file}`);
+  }
+  const record = value as unknown as Record<string, unknown>;
+  if ("runId" in record && (typeof record.runId !== "string" || typeof record.sessionId !== "string" ||
+      typeof record.state !== "string" || typeof record.updatedAt !== "string" ||
+      typeof record.workerPid !== "number" || !Number.isSafeInteger(record.workerPid) || record.workerPid <= 0)) {
+    throw new Error(`Persistent runtime run record is invalid: ${file}`);
+  }
+  const principal = record.principal;
+  if ("piSessionId" in record && (typeof record.sessionId !== "string" || typeof record.piSessionId !== "string" ||
+      (record.closed !== undefined && typeof record.closed !== "boolean") ||
+      (principal !== undefined && (!principal || typeof principal !== "object" ||
+        typeof (principal as Record<string, unknown>).id !== "string" || typeof (principal as Record<string, unknown>).kind !== "string")))) {
+    throw new Error(`Persistent runtime session record is invalid: ${file}`);
+  }
+  return value;
+}
+
+function recordPath(directory: string, id: string): string {
+  return path.join(directory, `${Buffer.from(id).toString("hex")}.json`);
 }
 
 function jsonValue(value: unknown): PiTranscriptEntry["content"] {
@@ -95,10 +124,11 @@ export class SubpolarRuntimeHost {
   private readonly runtime;
   private readonly now: () => Date;
   private readonly createId: () => string;
-  private readonly ledgerFile?: string;
-  private readonly ledger: HostLedger;
+  private readonly stateDirectory?: string;
 
   constructor(private readonly options: SubpolarRuntimeHostOptions<unknown>) {
+    this.now = options.now ?? (() => new Date());
+    this.createId = options.createId ?? (() => crypto.randomUUID());
     const config = options.piConfig as { runtimeDataDir?: unknown } | undefined;
     const runtimeDataDir = typeof config?.runtimeDataDir === "string"
       ? config.runtimeDataDir
@@ -106,19 +136,8 @@ export class SubpolarRuntimeHost {
     const persistent = options.piFactory.supportsPersistentSessions === true
       && typeof runtimeDataDir === "string"
       && path.isAbsolute(runtimeDataDir);
-    this.ledgerFile = persistent ? path.join(runtimeDataDir, "subpolar-runtime-host.json") : undefined;
-    this.ledger = this.ledgerFile ? readLedger(this.ledgerFile) : { version: 1, sessions: {}, runs: {} };
-    if (this.ledgerFile) {
-      // The host cannot know whether an interrupted Pi side effect completed. Record uncertainty
-      // and leave reconciliation to T3's authoritative event log; never replay on startup.
-      for (const run of Object.values(this.ledger.runs)) {
-        if (run.state === "running") {
-          run.state = "unknown";
-          run.updatedAt = (options.now ?? (() => new Date()))().toISOString();
-        }
-      }
-      this.persistLedger();
-    }
+    this.stateDirectory = persistent ? path.join(runtimeDataDir, "subpolar-runtime-host") : undefined;
+    if (this.stateDirectory) this.recoverAbandonedRuns();
     this.capabilities = Object.freeze({
       scope: "process",
       durability: persistent ? "persistent" : "ephemeral",
@@ -133,8 +152,6 @@ export class SubpolarRuntimeHost {
         "filesystem-tools": false,
       },
     });
-    this.now = options.now ?? (() => new Date());
-    this.createId = options.createId ?? (() => crypto.randomUUID());
     const executor = createPiStatelessExecutor(
       options.piFactory,
       options.piConfig,
@@ -157,18 +174,21 @@ export class SubpolarRuntimeHost {
   createSession(principal?: Principal, requestedId?: string): RuntimeHostSession {
     if (requestedId) {
       const existing = this.sessions.get(requestedId);
-      if (existing) return { sessionId: requestedId, capabilities: this.capabilities };
-      const stored = this.ledger.sessions[requestedId];
-      this.sessions.set(requestedId, { id: requestedId, piSessionId: stored?.piSessionId ?? requestedId, principal: principal ?? stored?.principal, transcript: [] });
-      if (!stored) this.ledger.sessions[requestedId] = { piSessionId: requestedId, principal };
-      this.persistLedger();
+      if (existing) {
+        if (!samePrincipal(existing.principal, principal)) throw new Error("Runtime session belongs to a different principal");
+        return { sessionId: requestedId, capabilities: this.capabilities };
+      }
+      const stored = this.readSession(requestedId);
+      if (stored?.closed) throw new Error("Runtime session is closed");
+      if (stored && !samePrincipal(stored.principal, principal)) throw new Error("Runtime session belongs to a different principal");
+      if (!stored) this.createSessionRecord(requestedId, principal);
+      this.sessions.set(requestedId, { id: requestedId, piSessionId: stored?.piSessionId ?? requestedId, principal, transcript: [] });
       return { sessionId: requestedId, capabilities: this.capabilities };
     }
     let id = this.createId();
     while (this.sessions.has(id)) id = this.createId();
+    this.createSessionRecord(id, principal);
     this.sessions.set(id, { id, piSessionId: id, principal, transcript: [] });
-    this.ledger.sessions[id] = { piSessionId: id, principal };
-    this.persistLedger();
     return { sessionId: id, capabilities: this.capabilities };
   }
 
@@ -179,11 +199,15 @@ export class SubpolarRuntimeHost {
       throw new Error("Runtime host cannot resume sessions without persistent executor storage");
     }
     const existing = this.sessions.get(sessionId);
-    if (existing) return { sessionId, capabilities: this.capabilities };
-    const stored = this.ledger.sessions[sessionId];
-    this.sessions.set(sessionId, { id: sessionId, piSessionId: stored?.piSessionId ?? sessionId, principal: principal ?? stored?.principal, transcript: [] });
-    this.ledger.sessions[sessionId] ??= { piSessionId: sessionId, principal };
-    this.persistLedger();
+    if (existing) {
+      if (!samePrincipal(existing.principal, principal)) throw new Error("Runtime session belongs to a different principal");
+      return { sessionId, capabilities: this.capabilities };
+    }
+    const stored = this.readSession(sessionId);
+    if (stored?.closed) throw new Error("Runtime session is closed");
+    if (stored && !samePrincipal(stored.principal, principal)) throw new Error("Runtime session belongs to a different principal");
+    if (!stored) this.createSessionRecord(sessionId, principal);
+    this.sessions.set(sessionId, { id: sessionId, piSessionId: stored?.piSessionId ?? sessionId, principal, transcript: [] });
     return { sessionId, capabilities: this.capabilities };
   }
 
@@ -194,8 +218,7 @@ export class SubpolarRuntimeHost {
     const unlink = linkAbort(options.signal, controller);
     const requestId = this.createId();
     const runId = this.createId();
-    this.ledger.runs[runId] = { runId, sessionId, state: "running", updatedAt: this.now().toISOString() };
-    this.persistLedger();
+    this.writeRun(runId, { version: 1, runId, sessionId, state: "running", updatedAt: this.now().toISOString(), workerPid: process.pid });
     session.active = controller;
     const pending = this.runtime.run({
       runId,
@@ -208,8 +231,7 @@ export class SubpolarRuntimeHost {
     session.activeRun = pending;
     try {
       const result = await pending;
-      this.ledger.runs[runId] = { runId, sessionId, state: result.state, updatedAt: this.now().toISOString() };
-      this.persistLedger();
+      this.writeRun(runId, { version: 1, runId, sessionId, state: result.state, updatedAt: this.now().toISOString(), workerPid: process.pid });
       if (result.state === "completed") {
         const occurredAt = this.now().toISOString();
         session.transcript.push(
@@ -240,8 +262,8 @@ export class SubpolarRuntimeHost {
     session.active?.abort();
     await session.activeRun?.catch(() => undefined);
     this.sessions.delete(sessionId);
-    delete this.ledger.sessions[sessionId];
-    this.persistLedger();
+    const stored = this.readSession(sessionId);
+    if (stored) this.writeRecord(recordPath(this.sessionDirectory(), sessionId), { ...stored, closed: true });
     return true;
   }
 
@@ -251,12 +273,61 @@ export class SubpolarRuntimeHost {
     return session;
   }
 
-  private persistLedger(): void {
-    if (!this.ledgerFile) return;
-    mkdirSync(path.dirname(this.ledgerFile), { recursive: true });
-    const temporary = `${this.ledgerFile}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify(this.ledger), { mode: 0o600 });
-    renameSync(temporary, this.ledgerFile);
+  private sessionDirectory(): string {
+    const directory = path.join(this.stateDirectory!, "sessions");
+    mkdirSync(directory, { recursive: true });
+    return directory;
+  }
+
+  private runDirectory(): string {
+    const directory = path.join(this.stateDirectory!, "runs");
+    mkdirSync(directory, { recursive: true });
+    return directory;
+  }
+
+  private readSession(sessionId: string): StoredSession | undefined {
+    return this.stateDirectory ? readRecord<StoredSession>(recordPath(this.sessionDirectory(), sessionId)) : undefined;
+  }
+
+  private createSessionRecord(sessionId: string, principal?: Principal): void {
+    if (!this.stateDirectory) return;
+    const file = recordPath(this.sessionDirectory(), sessionId);
+    const value: StoredSession = { version: 1, sessionId, piSessionId: sessionId, principal };
+    try { writeFileSync(file, JSON.stringify(value), { flag: "wx", mode: 0o600 }); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const existing = readRecord<StoredSession>(file);
+      if (!existing || existing.closed || !samePrincipal(existing.principal, principal)) {
+        throw new Error("Runtime session belongs to a different principal");
+      }
+    }
+  }
+
+  private writeRun(runId: string, value: StoredRun): void {
+    if (this.stateDirectory) this.writeRecord(recordPath(this.runDirectory(), runId), value);
+  }
+
+  private writeRecord(file: string, value: StoredSession | StoredRun): void {
+    mkdirSync(path.dirname(file), { recursive: true });
+    const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
+    writeFileSync(temporary, JSON.stringify(value), { mode: 0o600 });
+    renameSync(temporary, file);
+  }
+
+  private recoverAbandonedRuns(): void {
+    const directory = this.runDirectory();
+    // Per-run files avoid one host overwriting another host's reservations. Only mark records
+    // owned by a process that has exited; a second live host sharing this volume is left alone.
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith(".json")) continue;
+      const file = path.join(directory, name);
+      const run = readRecord<StoredRun>(file);
+      if (!run || run.state !== "running" || run.workerPid === process.pid) continue;
+      let alive = true;
+      try { process.kill(run.workerPid, 0); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") alive = false; }
+      if (!alive) this.writeRecord(file, { ...run, state: "unknown", updatedAt: this.now().toISOString() });
+    }
   }
 }
 

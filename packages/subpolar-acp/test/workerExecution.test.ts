@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { ExecutionContext, ToolCall } from "@subpolar/shared";
-import { createWorkerExecutionOptions, initializeWorkerMcpTools } from "../src/workerExecution.ts";
+import { createWorkerExecutionOptions, readWorkerMcpToolDefinitions } from "../src/workerExecution.ts";
 
 const roots: string[] = [];
 
@@ -46,50 +46,28 @@ test("worker execution requires its explicit proxy flag and does not use manager
   ]);
 });
 
-test("managed MCP tools are discovered with server policy and dispatched through the provider registry", async () => {
-  const calls: unknown[] = [];
-  let registryOptions: unknown;
-  let closed = false;
+test("managed worker accepts only host-brokered MCP tool metadata", () => {
+  const definitions = [{
+    id: "mcp/issue-tracker/search",
+    namespace: "issue-tracker",
+    description: "Search issues",
+    inputSchema: { type: "object", properties: { query: { type: "string" } } },
+    enabled: true,
+    risk: "high",
+    metadata: { serverId: "issue-tracker" },
+  }];
   const environment = {
-    SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
-    SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
-    SUBPOLAR_MCP_SERVERS: JSON.stringify([{ id: "issue-tracker", url: "https://mcp.example.com/mcp" }]),
+    SUBPOLAR_ACP_WORKER_MODE: "1",
+    SUBPOLAR_MCP_TOOL_DEFINITIONS: JSON.stringify(definitions),
+    SUBPOLAR_MCP_HEADER_ISSUES: "must-not-be-used-in-worker",
+    SUBPOLAR_MCP_SERVERS: "must-not-be-used-in-worker",
   };
-  const initialized = await initializeWorkerMcpTools(environment, ((options) => {
-    registryOptions = options;
-    return {
-      async connect(config) {
-        expect(config).toMatchObject({ id: "issue-tracker", url: "https://mcp.example.com/mcp" });
-        return {
-          async listTools() {
-            return [{ toolId: "issue-tracker/search", namespace: "issue-tracker", name: "search", description: "Search issues", inputSchema: { type: "object", properties: { query: { type: "string" } } } }];
-          },
-          async callTool(name, input) { calls.push({ name, input }); return { content: [{ type: "text", text: "found" }], isError: false, raw: {} }; },
-          async close() {},
-        };
-      },
-      async close() { closed = true; },
-    };
-  }) as NonNullable<import("../src/workerExecution.ts").WorkerExecutionDependencies["createMcpRegistry"]>);
-
-  expect(registryOptions).toEqual({ providerInstanceId: "provider-instance-9", allowedHosts: ["mcp.example.com"] });
-  expect(initialized?.toolDefinitions).toMatchObject([{ id: "mcp/issue-tracker/search", namespace: "issue-tracker", risk: "high" }]);
-  await expect(initialized?.executeTool!({ callId: "call", toolId: "mcp/issue-tracker/search", input: { query: "bug" } }, initialized!.toolDefinitions![0]!, context("/tmp")))
-    .resolves.toMatchObject({ ok: true, value: { isError: false } });
-  expect(calls).toEqual([{ name: "search", input: { query: "bug" } }]);
-  await initialized?.close!();
-  expect(closed).toBe(true);
-});
-
-test("managed MCP configuration requires server-assigned identity and host allowlist", async () => {
-  await expect(initializeWorkerMcpTools({
-    SUBPOLAR_MCP_SERVERS: "[]",
-    SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
-  })).rejects.toThrow(/server-assigned provider instance ID/);
-  await expect(initializeWorkerMcpTools({
-    SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
-    SUBPOLAR_MCP_SERVERS: "[]",
-  })).rejects.toThrow(/hostname allowlist/);
+  expect(readWorkerMcpToolDefinitions(environment)).toEqual(definitions);
+  expect(createWorkerExecutionOptions(environment).toolDefinitions).toContainEqual(definitions[0]);
+  expect(() => readWorkerMcpToolDefinitions({ SUBPOLAR_MCP_TOOL_DEFINITIONS: "not-json" })).toThrow(/valid JSON/);
+  expect(() => readWorkerMcpToolDefinitions({
+    SUBPOLAR_MCP_TOOL_DEFINITIONS: JSON.stringify([{ ...definitions[0], id: "mcp/invalid" }]),
+  })).toThrow(/canonical and unique/);
 });
 
 test("worker execute runs argv in the mounted workspace with bounded output", async () => {
@@ -138,6 +116,26 @@ test("worker execute omits manager credentials from child processes", async () =
   }), options.toolDefinitions![0], context(root));
 
   expect(response).toMatchObject({ ok: true, value: { stdout: "false\n", exitCode: 0 } });
+});
+
+test("agent-launched commands cannot read host-side MCP credentials or configuration", async () => {
+  const root = await workspace();
+  const previousHeader = process.env.SUBPOLAR_MCP_HEADER_ISSUES;
+  const previousConfig = process.env.SUBPOLAR_MCP_SERVERS;
+  process.env.SUBPOLAR_MCP_HEADER_ISSUES = "host-only-secret";
+  process.env.SUBPOLAR_MCP_SERVERS = '[{"id":"issue-tracker"}]';
+  try {
+    const options = createWorkerExecutionOptions({ SUBPOLAR_ACP_WORKER_MODE: "1" }, { workspaceRoot: root });
+    const response = await options.executeTool!(call({
+      command: ["node", "-e", "console.log(Object.keys(process.env).some(key => key.startsWith('SUBPOLAR_MCP_')))"],
+    }), options.toolDefinitions![0]!, context(root));
+    expect(response).toMatchObject({ ok: true, value: { stdout: "false\n", exitCode: 0 } });
+  } finally {
+    if (previousHeader === undefined) delete process.env.SUBPOLAR_MCP_HEADER_ISSUES;
+    else process.env.SUBPOLAR_MCP_HEADER_ISSUES = previousHeader;
+    if (previousConfig === undefined) delete process.env.SUBPOLAR_MCP_SERVERS;
+    else process.env.SUBPOLAR_MCP_SERVERS = previousConfig;
+  }
 });
 
 test("worker execute terminates a running process when its tool call is cancelled", async () => {

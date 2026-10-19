@@ -8,7 +8,7 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 import type { EnvironmentManagedSessionRequest, EnvironmentManager, EnvironmentRequest } from "@subpolar/environments";
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
-import { layerManagedAcpProxy, makeManagedAcpManager } from "../src/managedProxy.ts";
+import { layerManagedAcpProxy, makeManagedAcpManager, type ManagedAcpProxyOptions } from "../src/managedProxy.ts";
 
 const baseEnvironment = {
   SUBPOLAR_MANAGER_URL: "http://subpolar-manager:8787",
@@ -242,10 +242,12 @@ test("managed proxy starts a worker for the requested worktree and forwards ACP 
   expect(fake.calls.some((call) => call.method === "terminate")).toBe(true);
 });
 
-test("managed proxy forwards only configured MCP credentials and the server-assigned instance identity", async () => {
+test("managed proxy keeps MCP credentials on the host and brokers exact worker calls", async () => {
   const { stdio, input, output } = await Effect.runPromise(makeInMemoryStdio());
   const scope = await Effect.runPromise(Scope.make());
   const fake = fakeManager();
+  const mcpCalls: unknown[] = [];
+  const registryOwners: unknown[] = [];
   const mcpEnvironment = {
     ...baseEnvironment,
     SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
@@ -261,19 +263,54 @@ test("managed proxy forwards only configured MCP credentials and the server-assi
   await Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
     environment: mcpEnvironment,
     manager: fake.manager,
+    createMcpRegistry: ((registryOptions) => {
+      registryOwners.push(registryOptions);
+      return {
+        async connect(server) {
+          expect(server).toMatchObject({ id: "issue-tracker", url: "https://mcp.example.com/mcp" });
+          return {
+            async listTools() {
+              return [{ toolId: "issue-tracker/search", namespace: "issue-tracker", name: "search", description: "Search issues", inputSchema: { type: "object", properties: { query: { type: "string" } } } }];
+            },
+            async callTool(name, args) {
+              mcpCalls.push({ name, args });
+              return { content: [{ type: "text", text: "found" }], isError: false, raw: {} };
+            },
+            async close() {},
+          };
+        },
+        async close() {},
+      };
+    }) as NonNullable<ManagedAcpProxyOptions["createMcpRegistry"]>,
   }), scope));
 
   await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 2, info: { name: "t3", version: "1" }, capabilities: {} } }));
   await readMessage(output, (message) => message.id === 1);
   await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/workspaces/project-a" } }));
-  await readMessage(output, (message) => message.id === 2);
-  expect(fake.calls[0]?.process?.environment).toMatchObject({
-    SUBPOLAR_PROVIDER_INSTANCE_ID: "provider-instance-9",
-    SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
-    SUBPOLAR_MCP_SERVERS: mcpEnvironment.SUBPOLAR_MCP_SERVERS,
-    SUBPOLAR_MCP_HEADER_ISSUES: "Bearer issue-secret",
+  const created = await readMessage(output, (message) => message.id === 2);
+  const nativeSessionId = (created.result as { sessionId: string }).sessionId;
+  const childEnvironment = fake.calls[0]?.process?.environment ?? {};
+  expect(registryOwners).toEqual([{ providerInstanceId: "provider-instance-9", allowedHosts: ["mcp.example.com"] }]);
+  expect(JSON.parse(childEnvironment.SUBPOLAR_MCP_TOOL_DEFINITIONS ?? "[]")).toMatchObject([
+    { id: "mcp/issue-tracker/search", namespace: "issue-tracker", risk: "high" },
+  ]);
+  for (const key of ["SUBPOLAR_PROVIDER_INSTANCE_ID", "SUBPOLAR_MCP_ALLOWED_HOSTS", "SUBPOLAR_MCP_SERVERS", "SUBPOLAR_MCP_HEADER_ISSUES", "UNRELATED_SECRET"]) {
+    expect(childEnvironment).not.toHaveProperty(key);
+  }
+  fake.emit("managed-1", {
+    jsonrpc: "2.0",
+    id: 901,
+    method: "subpolar/mcp",
+    params: {
+      sessionId: nativeSessionId,
+      requestId: "b7fa0c99-171f-4bb9-ac7a-a0c34301ac76",
+      toolId: "mcp/issue-tracker/search",
+      arguments: { query: "regression" },
+    },
   });
-  expect(fake.calls[0]?.process?.environment).not.toHaveProperty("UNRELATED_SECRET");
+  const toolResponse = await fake.waitForWrite((call) => call.method === "write" && call.data?.includes('"id":901') === true);
+  expect(JSON.parse(toolResponse.data!.trim())).toMatchObject({ result: { isError: false } });
+  expect(mcpCalls).toEqual([{ name: "search", args: { query: "regression" } }]);
   await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
@@ -281,22 +318,15 @@ test("managed proxy rejects unscoped MCP configuration before starting a worker"
   const { stdio, input, output } = await Effect.runPromise(makeInMemoryStdio());
   const scope = await Effect.runPromise(Scope.make());
   const fake = fakeManager();
-  await Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
+  await expect(Effect.runPromise(Layer.buildWithScope(layerManagedAcpProxy(stdio, {
     environment: {
       ...baseEnvironment,
       SUBPOLAR_MCP_SERVERS: "[]",
       SUBPOLAR_MCP_ALLOWED_HOSTS: '["mcp.example.com"]',
     },
     manager: fake.manager,
-  }), scope));
-
-  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 2, info: { name: "t3", version: "1" }, capabilities: {} } }));
-  await readMessage(output, (message) => message.id === 1);
-  await Effect.runPromise(send(input, { jsonrpc: "2.0", id: 2, method: "session/new", params: { cwd: "/workspaces/project-a" } }));
-  const response = await readMessage(output, (message) => message.id === 2);
-  expect(response.error).toBeDefined();
+  }), scope))).rejects.toThrow(/provider instance ID/);
   expect(fake.calls.some((call) => call.method === "start")).toBe(false);
-  await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
 test("managed proxy keeps the T3 MCP bearer on the host and relays tools through the scoped MCP session", async () => {

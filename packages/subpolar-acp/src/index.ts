@@ -83,10 +83,6 @@ function createRuntimeHost(
   emitProgress: (sessionId: string, runId: string, event: unknown) => Effect.Effect<void>,
 ) {
   const toolDefinitions = options.executeTool ? options.toolDefinitions ?? [] : [];
-  const toolNameBySdkName = new Map(toolDefinitions.map((definition) => [
-    `subpolar_${createHash("sha256").update(definition.id).digest("hex").slice(0, 16)}`,
-    definition.id,
-  ]));
   const gateway = createPolicyGateway({
     tools: toolDefinitions,
     validateInput: (input, definition) => validateToolInput(
@@ -152,6 +148,10 @@ function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effe
             : {}),
         }
       : options;
+    const toolNameBySdkName = new Map((initializedOptions.executeTool ? initializedOptions.toolDefinitions ?? [] : []).map((definition) => [
+      `subpolar_${createHash("sha256").update(definition.id).digest("hex").slice(0, 16)}`,
+      definition.id,
+    ]));
     const sessions = new Map<string, SessionContext>();
     const activeSessions = new Set<string>();
     const activeRunIds = new Map<string, string>();
@@ -231,10 +231,47 @@ function makeAgent(stdio: Stdio.Stdio, options: SubpolarAcpOptions): Effect.Effe
           },
       } : {}),
     };
+    const callMcpBroker = async (call: ToolCall, sessionId: string | undefined, signal?: AbortSignal) => {
+      if (!sessionId || signal?.aborted || !call.input || typeof call.input !== "object" || Array.isArray(call.input)) {
+        return { ok: false as const, error: { code: "MCP_BROKER_UNAVAILABLE", message: "The managed MCP broker is unavailable" } };
+      }
+      try {
+        const requestId = randomUUID();
+        const request = Effect.runPromise(agent.client.extRequest("subpolar/mcp", {
+          sessionId,
+          requestId,
+          toolId: call.toolId,
+          arguments: call.input,
+        }), signal ? { signal } : undefined);
+        let cancelBrokerRequestPromise: Promise<void> | undefined;
+        const cancelBrokerRequest = () => {
+          cancelBrokerRequestPromise ??= Effect.runPromise(agent.client.extNotification("subpolar/cancel", {
+            sessionId,
+            requestId,
+          })).catch(() => undefined);
+          return cancelBrokerRequestPromise;
+        };
+        signal?.addEventListener("abort", cancelBrokerRequest, { once: true });
+        if (signal?.aborted) cancelBrokerRequest();
+        let value: unknown;
+        try {
+          value = await request;
+        } finally {
+          signal?.removeEventListener("abort", cancelBrokerRequest);
+          if (signal?.aborted) await cancelBrokerRequest();
+        }
+        return { ok: true as const, value };
+      } catch {
+        return { ok: false as const, error: { code: "MCP_BROKER_FAILED", message: "The authorized managed MCP call could not be completed" } };
+      }
+    };
     const runtimeOptions: SubpolarAcpOptions = workerMode && initializedOptions.executeTool
       ? {
           ...initializedOptions,
           executeTool: async (call, definition, context, signal) => {
+            if (definition.id.startsWith("mcp/")) {
+              return callMcpBroker(call, context.sessionId, signal);
+            }
             if (definition.id !== "internal/t3-mcp/list-tools" && definition.id !== "internal/t3-mcp/call-tool") {
               return initializedOptions.executeTool!(call, definition, context, signal);
             }
