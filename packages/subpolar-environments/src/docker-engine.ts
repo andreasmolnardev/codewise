@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off globalTimers:off -- Docker Engine I/O is an imperative native Node adapter.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
@@ -6,6 +7,7 @@ import path from "node:path";
 import { request as httpRequest, type IncomingMessage, type RequestOptions } from "node:http";
 import type {
   DockerClient,
+  DockerMount,
   DockerContainerCreateOptions,
   DockerContainerInspection,
   DockerContainerProcessRequest,
@@ -239,12 +241,11 @@ export type DockerEngineTransport = (
 ) => Promise<DockerEngineTransportResponse>;
 
 export class DockerEngineClientError extends Error {
-  constructor(
-    readonly statusCode: number | undefined,
-    message: string,
-    options?: ErrorOptions,
-  ) {
+  readonly statusCode: number | undefined;
+
+  constructor(statusCode: number | undefined, message: string, options?: ErrorOptions) {
     super(message, options);
+    this.statusCode = statusCode;
     this.name = "DockerEngineClientError";
   }
 }
@@ -322,14 +323,15 @@ function normalizeInspection(value: unknown): DockerContainerInspection {
     Object.entries(networks).map(([name, network]) => [name, stringArray(record(network).Aliases)]),
   );
   const mounts = Array.isArray(container.Mounts)
-    ? container.Mounts.map((mountValue) => {
+    ? container.Mounts.map((mountValue): DockerMount => {
         const mount = record(mountValue);
         const type = text(mount.Type);
+        const mountType: "bind" | "volume" = type === "volume" ? "volume" : "bind";
         return {
-          type: type as "bind" | "volume",
+          type: mountType,
           source: type === "volume" ? text(mount.Name) : text(mount.Source),
           target: text(mount.Destination),
-          readOnly: !boolean(mount.RW),
+          readOnly: false,
         };
       })
     : [];
@@ -931,6 +933,11 @@ async function runDockerTty(
     async terminate() {
       if (ended || terminating) return;
       terminating = true;
+      if (!request.controlToken)
+        throw new DockerEngineClientError(
+          undefined,
+          "Interactive process control token is missing",
+        );
       await terminateSupervisor(containerId, request.controlToken);
       await result;
     },

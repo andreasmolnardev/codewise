@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, it as test } from "@effect/vitest";
 import { AcpPermissionBridgeError, awaitAcpPermissionDecision } from "../src/permission.ts";
 
 test("only an explicit ACP reject is a denial", async () => {

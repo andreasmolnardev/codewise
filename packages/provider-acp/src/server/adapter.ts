@@ -5500,53 +5500,56 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             }),
           );
           if (flavor.registerExtensions !== undefined) {
-            yield* flavor.registerExtensions({
-              runtime: targetRuntime,
-              threadId: input.threadId,
-              activeSessionId: Ref.get(activeSessionId),
-              reportProviderRetry: (notice) =>
-                runRuntimeCallbackAtGeneration(handlerGeneration, reportProviderRetry(notice)).pipe(
-                  Effect.asVoid,
-                ),
-              requestUserInput,
-              captureProposedPlan,
-              lastProposedPlanMarkdown,
-              finishSubagent: (notice) =>
-                runRuntimeCallbackAtGeneration(
-                  handlerGeneration,
-                  Effect.gen(function* () {
-                    if (yield* Ref.get(stoppedRunQuarantine)) return;
-                    if ((yield* Ref.get(activeSessionId)) !== notice.sessionId) return;
-                    yield* finishSubagentFromNotice(notice);
-                  }),
-                ).pipe(Effect.asVoid),
-              applyBackgroundTaskMutation: (mutation) =>
-                runRuntimeCallbackAtGeneration(
-                  handlerGeneration,
-                  Effect.gen(function* () {
-                    if (yield* Ref.get(stoppedRunQuarantine)) return;
-                    if ((yield* Ref.get(activeSessionId)) !== mutation.sessionId) return;
-                    if (
-                      mutation.status !== "running" &&
-                      mutation.report !== undefined &&
-                      !(yield* Ref.get(handledBackgroundTaskIdsInActiveTurn)).has(mutation.taskId)
-                    ) {
-                      yield* recordWakeReport(mutation.taskId, {
-                        ...mutation.report,
-                        outcome: mutation.status,
-                      });
-                    }
-                    yield* applyLateBackgroundMutation(mutation.sessionId, mutation);
-                    if (mutation.status !== "running") {
-                      yield* finishRegisteredBackgroundTool({
-                        taskId: mutation.taskId,
-                        status: mutation.status,
-                        ...(mutation.output === undefined ? {} : { output: mutation.output }),
-                      });
-                    }
-                  }),
-                ).pipe(Effect.asVoid),
-            });
+            yield* flavor
+              .registerExtensions({
+                runtime: targetRuntime,
+                threadId: input.threadId,
+                activeSessionId: Ref.get(activeSessionId),
+                reportProviderRetry: (notice) =>
+                  runRuntimeCallbackAtGeneration(
+                    handlerGeneration,
+                    reportProviderRetry(notice),
+                  ).pipe(Effect.asVoid),
+                requestUserInput,
+                captureProposedPlan,
+                lastProposedPlanMarkdown,
+                finishSubagent: (notice) =>
+                  runRuntimeCallbackAtGeneration(
+                    handlerGeneration,
+                    Effect.gen(function* () {
+                      if (yield* Ref.get(stoppedRunQuarantine)) return;
+                      if ((yield* Ref.get(activeSessionId)) !== notice.sessionId) return;
+                      yield* finishSubagentFromNotice(notice);
+                    }),
+                  ).pipe(Effect.asVoid),
+                applyBackgroundTaskMutation: (mutation) =>
+                  runRuntimeCallbackAtGeneration(
+                    handlerGeneration,
+                    Effect.gen(function* () {
+                      if (yield* Ref.get(stoppedRunQuarantine)) return;
+                      if ((yield* Ref.get(activeSessionId)) !== mutation.sessionId) return;
+                      if (
+                        mutation.status !== "running" &&
+                        mutation.report !== undefined &&
+                        !(yield* Ref.get(handledBackgroundTaskIdsInActiveTurn)).has(mutation.taskId)
+                      ) {
+                        yield* recordWakeReport(mutation.taskId, {
+                          ...mutation.report,
+                          outcome: mutation.status,
+                        });
+                      }
+                      yield* applyLateBackgroundMutation(mutation.sessionId, mutation);
+                      if (mutation.status !== "running") {
+                        yield* finishRegisteredBackgroundTool({
+                          taskId: mutation.taskId,
+                          status: mutation.status,
+                          ...(mutation.output === undefined ? {} : { output: mutation.output }),
+                        });
+                      }
+                    }),
+                  ).pipe(Effect.asVoid),
+              })
+              .pipe(Effect.provideService(Crypto.Crypto, crypto));
           }
         });
 

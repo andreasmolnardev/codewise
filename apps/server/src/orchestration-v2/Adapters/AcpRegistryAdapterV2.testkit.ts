@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
+import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapterRegistry from "../ProviderAdapterRegistry.ts";
 import type { ProviderReplayGate } from "@t3tools/provider-testing/replayGate";
@@ -30,6 +31,9 @@ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRe
 const REPLAY_SETTINGS = Schema.decodeUnknownSync(AcpRegistrySettings)({
   agentId: "replay-agent",
   authMethodId: "replay",
+  enableSubpolarCredentialBroker: false,
+  subpolarCredentialProviderId: "",
+  enableSubpolarModelEgress: false,
 });
 
 function layerAcpRegistryProviderAdapterRegistryReplay(
@@ -43,6 +47,7 @@ function layerAcpRegistryProviderAdapterRegistryReplay(
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const host = yield* ProviderHost.ProviderHost;
       const replayGate = options.replayGate;
       const replayDir = yield* fileSystem
         .makeTempDirectory({
@@ -56,6 +61,7 @@ function layerAcpRegistryProviderAdapterRegistryReplay(
       const adapter = yield* makeAcpRegistryAdapterV2({
         instanceId: ACP_REGISTRY_DEFAULT_INSTANCE_ID,
         settings: REPLAY_SETTINGS,
+        host,
         environment: {},
         selfInvocation: yield* resolveSelfInvocation(),
         makeRuntime: makeAcpReplayRuntime({
@@ -67,7 +73,7 @@ function layerAcpRegistryProviderAdapterRegistryReplay(
           ...(replayGate === undefined ? {} : { replayGate }),
         }),
         assertComplete: makeAcpReplayCompletenessAssertion(fileSystem, statusPath, transcript),
-      });
+      }).pipe(Effect.orDie);
       return [adapter];
     }),
   ).pipe(

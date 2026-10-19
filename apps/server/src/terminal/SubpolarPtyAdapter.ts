@@ -1,9 +1,12 @@
+// @effect-diagnostics nodeBuiltinImport:off -- The terminal boundary hashes session IDs and validates host filesystem paths synchronously.
 import { createHash } from "node:crypto";
 import path from "node:path";
 
 import * as Effect from "effect/Effect";
 
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import { createEnvironmentManagerHttpClient } from "@subpolar/environments/manager-client";
+import type { EnvironmentRequest } from "@subpolar/environments";
 import { createSubpolarManagerAccess } from "../environment/SubpolarManagerAccess.ts";
 
 export interface ManagedTerminalSpawnInput {
@@ -141,7 +144,7 @@ export function makeSubpolarTerminalSpawner(
           bound.manager,
           bound.request,
           session.sessionId,
-          session.sequence ?? 0,
+          session.outputSequence,
         );
       },
       catch: (cause) =>
@@ -163,13 +166,22 @@ class ManagedTerminalPtyProcess implements PtyAdapter.PtyProcess {
   private outputStarted = false;
   private writeQueue: Promise<void> = Promise.resolve();
   private readonly decoder = new TextDecoder();
+  private readonly manager: ReturnType<typeof createEnvironmentManagerHttpClient>;
+  private readonly environment: EnvironmentRequest;
+  private readonly sessionId: string;
+  private cursor: number;
 
   constructor(
-    private readonly manager: ReturnType<typeof createEnvironmentManagerHttpClient>,
-    private readonly environment: EnvironmentRequest,
-    private readonly sessionId: string,
-    private cursor: number,
-  ) {}
+    manager: ReturnType<typeof createEnvironmentManagerHttpClient>,
+    environment: EnvironmentRequest,
+    sessionId: string,
+    cursor: number,
+  ) {
+    this.manager = manager;
+    this.environment = environment;
+    this.sessionId = sessionId;
+    this.cursor = cursor;
+  }
 
   write(data: string): void {
     this.enqueue(() =>

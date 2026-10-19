@@ -1,4 +1,4 @@
-import { ProjectId, type ProjectScript } from "@t3tools/contracts";
+import { ProjectId, ProviderInstanceId, ThreadId, type ProjectScript } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import {
   projectScriptRuntimeEnv,
@@ -196,10 +196,7 @@ export const make = Effect.gen(function* () {
       .map((value) => value.trim())
       .filter(Boolean),
   );
-  const completionShell = resolveCompletionShell(
-    yield* HostProcess.Platform,
-    hostEnvironment,
-  );
+  const completionShell = resolveCompletionShell(yield* HostProcess.Platform, hostEnvironment);
 
   const observeTerminalCompletion = (input: {
     readonly threadId: string;
@@ -376,14 +373,14 @@ export const make = Effect.gen(function* () {
     const requestedProviderInstanceId =
       input.providerInstanceId ??
       (yield* providerSessionRuntimes
-        .getByThreadId({ threadId: input.threadId })
+        .getByThreadId({ threadId: ThreadId.make(input.threadId) })
         .pipe(
           Effect.map(
             Option.match({
               onNone: () => undefined,
               onSome: (runtime) =>
-                runtime.providerName === "subpolar" && runtime.runtimeMode === "managed"
-                  ? runtime.providerInstanceId ?? undefined
+                runtime.providerName === "subpolar"
+                  ? (runtime.providerInstanceId ?? undefined)
                   : undefined,
             }),
           ),
@@ -413,7 +410,9 @@ export const make = Effect.gen(function* () {
         cwd,
         worktreePath: input.worktreePath,
         env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
-        ...(managedProviderInstanceId ? { providerInstanceId: managedProviderInstanceId } : {}),
+        ...(managedProviderInstanceId
+          ? { providerInstanceId: ProviderInstanceId.make(managedProviderInstanceId) }
+          : {}),
       })
       .pipe(
         Effect.mapError(

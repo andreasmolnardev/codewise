@@ -1,8 +1,15 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- The environment manager is an imperative host adapter with injected time support.
 import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import path from "node:path";
 
-export type EnvironmentStatus = "creating" | "starting" | "ready" | "stopping" | "stopped" | "failed";
+export type EnvironmentStatus =
+  | "creating"
+  | "starting"
+  | "ready"
+  | "stopping"
+  | "stopped"
+  | "failed";
 
 export interface EnvironmentRequest {
   readonly ownerId: string;
@@ -42,7 +49,9 @@ export interface EnvironmentBackend {
   readonly id: string;
   inspect(identity: EnvironmentIdentity): Promise<ManagedEnvironment | null>;
   /** Inspect exact current/legacy container shapes for lifecycle-only cleanup or migration. */
-  inspectForLifecycle?(identity: EnvironmentIdentity): Promise<EnvironmentLifecycleInspection | null>;
+  inspectForLifecycle?(
+    identity: EnvironmentIdentity,
+  ): Promise<EnvironmentLifecycleInspection | null>;
   create(identity: EnvironmentIdentity): Promise<ManagedEnvironment>;
   start(environment: ManagedEnvironment): Promise<ManagedEnvironment>;
   stop(environment: ManagedEnvironment): Promise<ManagedEnvironment>;
@@ -148,18 +157,56 @@ export interface EnvironmentManager {
   stop(request: EnvironmentRequest): Promise<ManagedEnvironment>;
   restart?(request: EnvironmentRequest): Promise<ManagedEnvironment>;
   remove(request: EnvironmentRequest): Promise<void>;
-  execute(request: EnvironmentRequest, command: readonly string[], process?: EnvironmentProcessRequest): Promise<EnvironmentProcessResult>;
-  startInteractive(request: EnvironmentRequest, command: readonly string[], process?: EnvironmentInteractiveProcessRequest): Promise<EnvironmentInteractiveStartResult>;
+  execute(
+    request: EnvironmentRequest,
+    command: readonly string[],
+    process?: EnvironmentProcessRequest,
+  ): Promise<EnvironmentProcessResult>;
+  startInteractive(
+    request: EnvironmentRequest,
+    command: readonly string[],
+    process?: EnvironmentInteractiveProcessRequest,
+  ): Promise<EnvironmentInteractiveStartResult>;
   writeInteractive(request: EnvironmentRequest, sessionId: string, data: Uint8Array): Promise<void>;
-  resizeInteractive(request: EnvironmentRequest, sessionId: string, columns: number, rows: number): Promise<void>;
-  attachInteractiveOutput(request: EnvironmentRequest, sessionId: string, afterSequence?: number): AsyncIterable<EnvironmentInteractiveOutputEvent | { readonly type: "exit"; readonly result: EnvironmentProcessResult }>;
+  resizeInteractive(
+    request: EnvironmentRequest,
+    sessionId: string,
+    columns: number,
+    rows: number,
+  ): Promise<void>;
+  attachInteractiveOutput(
+    request: EnvironmentRequest,
+    sessionId: string,
+    afterSequence?: number,
+  ): AsyncIterable<
+    | EnvironmentInteractiveOutputEvent
+    | { readonly type: "exit"; readonly result: EnvironmentProcessResult }
+  >;
   terminateInteractive(request: EnvironmentRequest, sessionId: string): Promise<void>;
   closeInteractiveSessions?(): Promise<void>;
-  startManagedSession(request: EnvironmentRequest, command: readonly string[], process?: EnvironmentManagedSessionRequest): Promise<EnvironmentManagedSessionStartResult>;
+  startManagedSession(
+    request: EnvironmentRequest,
+    command: readonly string[],
+    process?: EnvironmentManagedSessionRequest,
+  ): Promise<EnvironmentManagedSessionStartResult>;
   /** Open a byte-stream tunnel to a loopback listener inside this exact environment. */
-  startPortTunnel(request: EnvironmentRequest, port: number): Promise<EnvironmentManagedSessionStartResult>;
-  writeManagedSession(request: EnvironmentRequest, sessionId: string, data: Uint8Array): Promise<void>;
-  attachManagedSessionOutput(request: EnvironmentRequest, sessionId: string, afterSequence?: number): AsyncIterable<EnvironmentManagedSessionOutputEvent | { readonly type: "exit"; readonly result: EnvironmentProcessResult }>;
+  startPortTunnel(
+    request: EnvironmentRequest,
+    port: number,
+  ): Promise<EnvironmentManagedSessionStartResult>;
+  writeManagedSession(
+    request: EnvironmentRequest,
+    sessionId: string,
+    data: Uint8Array,
+  ): Promise<void>;
+  attachManagedSessionOutput(
+    request: EnvironmentRequest,
+    sessionId: string,
+    afterSequence?: number,
+  ): AsyncIterable<
+    | EnvironmentManagedSessionOutputEvent
+    | { readonly type: "exit"; readonly result: EnvironmentProcessResult }
+  >;
   terminateManagedSession(request: EnvironmentRequest, sessionId: string): Promise<void>;
   closeManagedSessions?(): Promise<void>;
   reconcile(): Promise<readonly EnvironmentReconciliationResult[]>;
@@ -189,12 +236,25 @@ export interface EnvironmentReconciliationResult {
 }
 
 export class EnvironmentManagerError extends Error {
+  readonly code:
+    | "INVALID_REQUEST"
+    | "WORKTREE_OUTSIDE_ROOT"
+    | "BACKEND_FAILURE"
+    | "OWNERSHIP_MISMATCH"
+    | "ENVIRONMENT_NOT_FOUND";
+
   constructor(
-    readonly code: "INVALID_REQUEST" | "WORKTREE_OUTSIDE_ROOT" | "BACKEND_FAILURE" | "OWNERSHIP_MISMATCH" | "ENVIRONMENT_NOT_FOUND",
+    code:
+      | "INVALID_REQUEST"
+      | "WORKTREE_OUTSIDE_ROOT"
+      | "BACKEND_FAILURE"
+      | "OWNERSHIP_MISMATCH"
+      | "ENVIRONMENT_NOT_FOUND",
     message: string,
     options?: ErrorOptions,
   ) {
     super(message, options);
+    this.code = code;
     this.name = "EnvironmentManagerError";
   }
 }
@@ -209,7 +269,10 @@ function requiredId(value: string, label: string): string {
 
 function isWithin(root: string, candidate: string): boolean {
   const relative = path.relative(root, candidate);
-  return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  return (
+    relative === "" ||
+    (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+  );
 }
 
 function stableId(identity: Omit<EnvironmentIdentity, "id">): string {
@@ -228,12 +291,19 @@ function stableId(identity: Omit<EnvironmentIdentity, "id">): string {
  * keys support gateway reconnects while this manager stays alive; graceful
  * shutdown terminates sessions, but a manager crash loses the session handles.
  */
+function wakeForSpace(entry: { wakeSpace: (() => void) | undefined }): void {
+  const wake = entry.wakeSpace;
+  entry.wakeSpace = undefined;
+  wake?.();
+}
+
 export function createEnvironmentManager(
   backend: EnvironmentBackend,
   registrations?: EnvironmentRegistrationStore,
   now: () => Date = () => new Date(),
 ): EnvironmentManager {
-  if (!backend.id.trim()) throw new EnvironmentManagerError("INVALID_REQUEST", "A backend ID is required");
+  if (!backend.id.trim())
+    throw new EnvironmentManagerError("INVALID_REQUEST", "A backend ID is required");
   const operations = new Map<string, Promise<unknown>>();
   type InteractiveEntry = {
     readonly identity: EnvironmentIdentity;
@@ -247,8 +317,8 @@ export function createEnvironmentManager(
     sequence: number;
     done: boolean;
     attached: boolean;
-    wake?: () => void;
-    wakeSpace?: () => void;
+    wake: (() => void) | undefined;
+    wakeSpace: (() => void) | undefined;
     result?: EnvironmentProcessResult;
   };
   const interactiveSessions = new Map<string, InteractiveEntry>();
@@ -265,8 +335,8 @@ export function createEnvironmentManager(
     sequence: number;
     done: boolean;
     attached: boolean;
-    wake?: () => void;
-    wakeSpace?: () => void;
+    wake: (() => void) | undefined;
+    wakeSpace: (() => void) | undefined;
     result?: EnvironmentProcessResult;
   };
   const managedSessions = new Map<string, ManagedSessionEntry>();
@@ -279,7 +349,10 @@ export function createEnvironmentManager(
     const ownerId = requiredId(request.ownerId, "ownerId");
     const workspaceId = requiredId(request.workspaceId, "workspaceId");
     if (!path.isAbsolute(request.storageRoot) || !path.isAbsolute(request.worktreePath)) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Storage root and worktree path must be absolute");
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Storage root and worktree path must be absolute",
+      );
     }
 
     let storageRoot: string;
@@ -290,10 +363,15 @@ export function createEnvironmentManager(
         realpath(path.resolve(request.worktreePath)),
       ]);
     } catch (cause) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Storage root and worktree must exist", { cause });
+      throw new EnvironmentManagerError("INVALID_REQUEST", "Storage root and worktree must exist", {
+        cause,
+      });
     }
     if (!isWithin(storageRoot, worktreePath)) {
-      throw new EnvironmentManagerError("WORKTREE_OUTSIDE_ROOT", "Worktree resolves outside the configured storage root");
+      throw new EnvironmentManagerError(
+        "WORKTREE_OUTSIDE_ROOT",
+        "Worktree resolves outside the configured storage root",
+      );
     }
 
     const values = { ownerId, workspaceId, storageRoot, worktreePath };
@@ -303,7 +381,9 @@ export function createEnvironmentManager(
   const withIdentityLock = async <A>(id: string, operation: () => Promise<A>): Promise<A> => {
     const prior = operations.get(id) ?? Promise.resolve();
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     const queued = prior.then(() => gate);
     operations.set(id, queued);
     await prior;
@@ -320,25 +400,42 @@ export function createEnvironmentManager(
       return await call();
     } catch (cause) {
       if (cause instanceof EnvironmentManagerError) throw cause;
-      throw new EnvironmentManagerError("BACKEND_FAILURE", `Environment backend failed to ${operation}`, { cause });
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        `Environment backend failed to ${operation}`,
+        { cause },
+      );
     }
   };
 
-  const validateRecord = (expected: EnvironmentIdentity, record: ManagedEnvironment): ManagedEnvironment => {
+  const validateRecord = (
+    expected: EnvironmentIdentity,
+    record: ManagedEnvironment,
+  ): ManagedEnvironment => {
     if (
-      !record || record.id !== expected.id || record.ownerId !== expected.ownerId ||
-      record.workspaceId !== expected.workspaceId || record.storageRoot !== expected.storageRoot ||
-      record.worktreePath !== expected.worktreePath || record.backendId !== backend.id ||
-      typeof record.resourceId !== "string" || record.resourceId.length === 0
+      !record ||
+      record.id !== expected.id ||
+      record.ownerId !== expected.ownerId ||
+      record.workspaceId !== expected.workspaceId ||
+      record.storageRoot !== expected.storageRoot ||
+      record.worktreePath !== expected.worktreePath ||
+      record.backendId !== backend.id ||
+      typeof record.resourceId !== "string" ||
+      record.resourceId.length === 0
     ) {
-      throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Backend environment identity or ownership does not match the request");
+      throw new EnvironmentManagerError(
+        "OWNERSHIP_MISMATCH",
+        "Backend environment identity or ownership does not match the request",
+      );
     }
     return record;
   };
 
   const persist = async (environment: ManagedEnvironment): Promise<ManagedEnvironment> => {
     if (!registrations) return environment;
-    const prior = (await registrations.loadAll()).find((entry) => entry.environment.id === environment.id);
+    const prior = (await registrations.loadAll()).find(
+      (entry) => entry.environment.id === environment.id,
+    );
     const timestamp = now().toISOString();
     await registrations.save(environment, prior?.createdAt ?? timestamp, timestamp);
     return environment;
@@ -346,18 +443,24 @@ export function createEnvironmentManager(
 
   const persistCreating = async (expected: EnvironmentIdentity): Promise<void> => {
     if (!registrations) return;
-    const prior = (await registrations.loadAll()).find((entry) => entry.environment.id === expected.id);
+    const prior = (await registrations.loadAll()).find(
+      (entry) => entry.environment.id === expected.id,
+    );
     const timestamp = now().toISOString();
     // Persist intent before asking the backend to allocate a resource. If the
     // manager exits after Docker creates the stable-name container, startup
     // reconciliation can adopt it only after the backend verifies its full
     // identity and isolation configuration.
-    await registrations.save({
-      ...expected,
-      backendId: backend.id,
-      resourceId: `pending:${expected.id}`,
-      status: "creating",
-    }, prior?.createdAt ?? timestamp, timestamp);
+    await registrations.save(
+      {
+        ...expected,
+        backendId: backend.id,
+        resourceId: `pending:${expected.id}`,
+        status: "creating",
+      },
+      prior?.createdAt ?? timestamp,
+      timestamp,
+    );
   };
 
   const inspect = async (expected: EnvironmentIdentity) => {
@@ -367,35 +470,47 @@ export function createEnvironmentManager(
 
   const inspectForLifecycle = async (expected: EnvironmentIdentity) => {
     if (backend.inspectForLifecycle) {
-      const found = await backendCall("inspect environment for lifecycle", () => backend.inspectForLifecycle!(expected));
-      return found === null ? null : {
-        environment: validateRecord(expected, found.environment),
-        compatibility: found.compatibility,
-      };
+      const found = await backendCall("inspect environment for lifecycle", () =>
+        backend.inspectForLifecycle!(expected),
+      );
+      return found === null
+        ? null
+        : {
+            environment: validateRecord(expected, found.environment),
+            compatibility: found.compatibility,
+          };
     }
     const current = await inspect(expected);
     return current === null ? null : { environment: current, compatibility: "current" as const };
   };
 
   const terminateSessionsForEnvironment = async (environmentId: string) => {
-    const owned = [...interactiveSessions.entries()].filter(([, entry]) => entry.identity.id === environmentId);
-    await Promise.all(owned.map(async ([sessionId, entry]) => {
-      await backendCall("terminate interactive process", () => entry.session.terminate());
-      interactiveSessions.delete(sessionId);
-      if (entry.clientKey) interactiveClientKeys.delete(entry.clientKey);
-      entry.done = true;
-      entry.wake?.();
-      entry.wakeSpace?.();
-    }));
-    const managed = [...managedSessions.entries()].filter(([, entry]) => entry.identity.id === environmentId);
-    await Promise.all(managed.map(async ([sessionId, entry]) => {
-      await backendCall("terminate managed process session", () => entry.session.terminate());
-      managedSessions.delete(sessionId);
-      if (entry.clientKey) managedSessionClientKeys.delete(entry.clientKey);
-      entry.done = true;
-      entry.wake?.();
-      entry.wakeSpace?.();
-    }));
+    const owned = [...interactiveSessions.entries()].filter(
+      ([, entry]) => entry.identity.id === environmentId,
+    );
+    await Promise.all(
+      owned.map(async ([sessionId, entry]) => {
+        await backendCall("terminate interactive process", () => entry.session.terminate());
+        interactiveSessions.delete(sessionId);
+        if (entry.clientKey) interactiveClientKeys.delete(entry.clientKey);
+        entry.done = true;
+        entry.wake?.();
+        entry.wakeSpace?.();
+      }),
+    );
+    const managed = [...managedSessions.entries()].filter(
+      ([, entry]) => entry.identity.id === environmentId,
+    );
+    await Promise.all(
+      managed.map(async ([sessionId, entry]) => {
+        await backendCall("terminate managed process session", () => entry.session.terminate());
+        managedSessions.delete(sessionId);
+        if (entry.clientKey) managedSessionClientKeys.delete(entry.clientKey);
+        entry.done = true;
+        entry.wake?.();
+        entry.wakeSpace?.();
+      }),
+    );
   };
 
   const ensure: EnvironmentManager["ensure"] = async (request) => {
@@ -404,20 +519,30 @@ export function createEnvironmentManager(
       const found = await inspectForLifecycle(expected);
       let current = found?.environment ?? null;
       if (found?.compatibility === "missing-runtime-data") {
-        throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment runtime data volume is missing; use rebuild or remove to recover it");
+        throw new EnvironmentManagerError(
+          "BACKEND_FAILURE",
+          "Environment runtime data volume is missing; use rebuild or remove to recover it",
+        );
       }
       if (found?.compatibility === "legacy") {
         await terminateSessionsForEnvironment(expected.id);
-        await backendCall("remove legacy environment for migration", () => backend.remove(current!));
+        await backendCall("remove legacy environment for migration", () =>
+          backend.remove(current!),
+        );
         current = null;
       }
       if (current === null) {
         await persistCreating(expected);
-        current = validateRecord(expected, await backendCall("create", () => backend.create(expected)));
+        current = validateRecord(
+          expected,
+          await backendCall("create", () => backend.create(expected)),
+        );
         await persist(current);
       }
       if (current.status === "ready") return persist(current);
-      return persist(validateRecord(expected, await backendCall("start", () => backend.start(current!))));
+      return persist(
+        validateRecord(expected, await backendCall("start", () => backend.start(current!))),
+      );
     });
   };
 
@@ -425,20 +550,42 @@ export function createEnvironmentManager(
     const expected = await identity(request);
     return withIdentityLock(expected.id, async () => {
       const found = await inspectForLifecycle(expected);
-      if (found === null) throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Environment has not been created");
+      if (found === null)
+        throw new EnvironmentManagerError(
+          "ENVIRONMENT_NOT_FOUND",
+          "Environment has not been created",
+        );
       if (found.compatibility === "missing-runtime-data") {
-        throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment runtime data volume is missing; use rebuild or remove to recover it");
+        throw new EnvironmentManagerError(
+          "BACKEND_FAILURE",
+          "Environment runtime data volume is missing; use rebuild or remove to recover it",
+        );
       }
       if (found.compatibility === "legacy") {
         await terminateSessionsForEnvironment(expected.id);
-        await backendCall("remove legacy environment for migration", () => backend.remove(found.environment));
+        await backendCall("remove legacy environment for migration", () =>
+          backend.remove(found.environment),
+        );
         await persistCreating(expected);
-        const created = validateRecord(expected, await backendCall("create migrated environment", () => backend.create(expected)));
+        const created = validateRecord(
+          expected,
+          await backendCall("create migrated environment", () => backend.create(expected)),
+        );
         await persist(created);
-        return persist(validateRecord(expected, await backendCall("start migrated environment", () => backend.start(created))));
+        return persist(
+          validateRecord(
+            expected,
+            await backendCall("start migrated environment", () => backend.start(created)),
+          ),
+        );
       }
       if (found.environment.status === "ready") return persist(found.environment);
-      return persist(validateRecord(expected, await backendCall("start", () => backend.start(found.environment))));
+      return persist(
+        validateRecord(
+          expected,
+          await backendCall("start", () => backend.start(found.environment)),
+        ),
+      );
     });
   };
 
@@ -446,10 +593,16 @@ export function createEnvironmentManager(
     const expected = await identity(request);
     return withIdentityLock(expected.id, async () => {
       const found = await inspectForLifecycle(expected);
-      if (found === null) throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Environment has not been created");
+      if (found === null)
+        throw new EnvironmentManagerError(
+          "ENVIRONMENT_NOT_FOUND",
+          "Environment has not been created",
+        );
       await terminateSessionsForEnvironment(found.environment.id);
       if (found.environment.status === "stopped") return persist(found.environment);
-      return persist(validateRecord(expected, await backendCall("stop", () => backend.stop(found.environment))));
+      return persist(
+        validateRecord(expected, await backendCall("stop", () => backend.stop(found.environment))),
+      );
     });
   };
 
@@ -457,23 +610,44 @@ export function createEnvironmentManager(
     const expected = await identity(request);
     return withIdentityLock(expected.id, async () => {
       const found = await inspectForLifecycle(expected);
-      if (found === null) throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Environment has not been created");
+      if (found === null)
+        throw new EnvironmentManagerError(
+          "ENVIRONMENT_NOT_FOUND",
+          "Environment has not been created",
+        );
       await terminateSessionsForEnvironment(found.environment.id);
       if (found.compatibility === "missing-runtime-data") {
-        throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment runtime data volume is missing; use rebuild or remove to recover it");
+        throw new EnvironmentManagerError(
+          "BACKEND_FAILURE",
+          "Environment runtime data volume is missing; use rebuild or remove to recover it",
+        );
       }
       if (found.compatibility === "legacy") {
-        await backendCall("remove legacy environment for restart", () => backend.remove(found.environment));
+        await backendCall("remove legacy environment for restart", () =>
+          backend.remove(found.environment),
+        );
         await persistCreating(expected);
-        const created = validateRecord(expected, await backendCall("create migrated environment", () => backend.create(expected)));
+        const created = validateRecord(
+          expected,
+          await backendCall("create migrated environment", () => backend.create(expected)),
+        );
         await persist(created);
-        return persist(validateRecord(expected, await backendCall("start migrated environment", () => backend.start(created))));
+        return persist(
+          validateRecord(
+            expected,
+            await backendCall("start migrated environment", () => backend.start(created)),
+          ),
+        );
       }
       let current = found.environment;
       if (current.status !== "stopped") {
-        current = await persist(validateRecord(expected, await backendCall("stop", () => backend.stop(current))));
+        current = await persist(
+          validateRecord(expected, await backendCall("stop", () => backend.stop(current))),
+        );
       }
-      return persist(validateRecord(expected, await backendCall("restart", () => backend.start(current))));
+      return persist(
+        validateRecord(expected, await backendCall("restart", () => backend.start(current))),
+      );
     });
   };
 
@@ -488,7 +662,10 @@ export function createEnvironmentManager(
         return;
       }
       await terminateSessionsForEnvironment(found.environment.id);
-      await backendCall(found.compatibility === "current" ? "remove" : "remove legacy or incomplete environment", () => backend.remove(found.environment));
+      await backendCall(
+        found.compatibility === "current" ? "remove" : "remove legacy or incomplete environment",
+        () => backend.remove(found.environment),
+      );
       await backend.removePersistentData?.(expected);
       await registrations?.remove(expected.id);
     });
@@ -499,8 +676,13 @@ export function createEnvironmentManager(
     const normalizedOwnerId = ownerId === undefined ? undefined : requiredId(ownerId, "ownerId");
     const entries = await registrations.loadAll();
     return entries
-      .filter((entry) => normalizedOwnerId === undefined || entry.environment.ownerId === normalizedOwnerId)
-      .sort((left, right) => left.environment.worktreePath.localeCompare(right.environment.worktreePath));
+      .filter(
+        (entry) =>
+          normalizedOwnerId === undefined || entry.environment.ownerId === normalizedOwnerId,
+      )
+      .sort((left, right) =>
+        left.environment.worktreePath.localeCompare(right.environment.worktreePath),
+      );
   };
 
   const inspectRegistered: NonNullable<EnvironmentManager["inspect"]> = async (request) => {
@@ -514,84 +696,175 @@ export function createEnvironmentManager(
       const found = await inspectForLifecycle(expected);
       if (found) {
         await terminateSessionsForEnvironment(found.environment.id);
-        await backendCall(found.compatibility === "current" ? "remove for rebuild" : "remove legacy or incomplete environment for rebuild", () => backend.remove(found.environment));
+        await backendCall(
+          found.compatibility === "current"
+            ? "remove for rebuild"
+            : "remove legacy or incomplete environment for rebuild",
+          () => backend.remove(found.environment),
+        );
       }
       await registrations?.remove(expected.id);
       await persistCreating(expected);
-      const created = validateRecord(expected, await backendCall("recreate", () => backend.create(expected)));
+      const created = validateRecord(
+        expected,
+        await backendCall("recreate", () => backend.create(expected)),
+      );
       await persist(created);
       if (created.status === "ready") return created;
-      return persist(validateRecord(expected, await backendCall("start rebuilt environment", () => backend.start(created))));
+      return persist(
+        validateRecord(
+          expected,
+          await backendCall("start rebuilt environment", () => backend.start(created)),
+        ),
+      );
     });
   };
 
   const execute: EnvironmentManager["execute"] = async (request, command, process = {}) => {
-    if (!Array.isArray(command) || command.length === 0 || command.some((part) => typeof part !== "string" || part.length === 0 || part.includes("\0"))) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Process command must be a non-empty argv array without NUL bytes");
+    if (
+      !Array.isArray(command) ||
+      command.length === 0 ||
+      command.some((part) => typeof part !== "string" || part.length === 0 || part.includes("\0"))
+    ) {
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Process command must be a non-empty argv array without NUL bytes",
+      );
     }
     if (process.signal?.aborted) {
       return { exitCode: null, cancelled: true };
     }
     const processBackend = backend as EnvironmentBackend & Partial<EnvironmentProcessBackend>;
     if (typeof processBackend.execute !== "function") {
-      throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment backend does not support managed process execution");
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Environment backend does not support managed process execution",
+      );
     }
     const environment = await ensure(request);
     if (environment.status !== "ready") {
-      throw new EnvironmentManagerError("BACKEND_FAILURE", "Managed environment is not ready for process execution");
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Managed environment is not ready for process execution",
+      );
     }
-    return backendCall("execute process", () => processBackend.execute!(environment, command, process));
+    return backendCall("execute process", () =>
+      processBackend.execute!(environment, command, process),
+    );
   };
 
   const resolveInteractiveSession = async (request: EnvironmentRequest, sessionId: string) => {
     const expected = await identity(request);
     const entry = interactiveSessions.get(sessionId);
-    if (!entry) throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Interactive process session was not found");
-    if (entry.identity.id !== expected.id || entry.identity.ownerId !== expected.ownerId || entry.identity.workspaceId !== expected.workspaceId) {
-      throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Interactive process session belongs to another environment");
+    if (!entry)
+      throw new EnvironmentManagerError(
+        "ENVIRONMENT_NOT_FOUND",
+        "Interactive process session was not found",
+      );
+    if (
+      entry.identity.id !== expected.id ||
+      entry.identity.ownerId !== expected.ownerId ||
+      entry.identity.workspaceId !== expected.workspaceId
+    ) {
+      throw new EnvironmentManagerError(
+        "OWNERSHIP_MISMATCH",
+        "Interactive process session belongs to another environment",
+      );
     }
     return entry;
   };
 
-  const startInteractive: EnvironmentManager["startInteractive"] = async (request, command, process = {}) => {
-    if (!Array.isArray(command) || command.length === 0 || command.length > 256 || command.some((part) => typeof part !== "string" || !part || part.includes("\0"))) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive command must be a non-empty argv array without NUL bytes");
+  const startInteractive: EnvironmentManager["startInteractive"] = async (
+    request,
+    command,
+    process = {},
+  ) => {
+    if (
+      !Array.isArray(command) ||
+      command.length === 0 ||
+      command.length > 256 ||
+      command.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+    ) {
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Interactive command must be a non-empty argv array without NUL bytes",
+      );
     }
-    const processBackend = backend as EnvironmentBackend & Partial<EnvironmentInteractiveProcessBackend>;
+    const processBackend = backend as EnvironmentBackend &
+      Partial<EnvironmentInteractiveProcessBackend>;
     if (typeof processBackend.startInteractive !== "function") {
-      throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment backend does not support interactive processes");
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Environment backend does not support interactive processes",
+      );
     }
     const environment = await ensure(request);
-    if (environment.status !== "ready") throw new EnvironmentManagerError("BACKEND_FAILURE", "Managed environment is not ready for interactive processes");
+    if (environment.status !== "ready")
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Managed environment is not ready for interactive processes",
+      );
     return withIdentityLock(environment.id, async () => {
       const clientSessionId = process.clientSessionId?.trim();
-      if (clientSessionId !== undefined && (!clientSessionId || clientSessionId.length > 256 || clientSessionId.includes("\0"))) {
-        throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive client session ID is invalid");
+      if (
+        clientSessionId !== undefined &&
+        (!clientSessionId || clientSessionId.length > 256 || clientSessionId.includes("\0"))
+      ) {
+        throw new EnvironmentManagerError(
+          "INVALID_REQUEST",
+          "Interactive client session ID is invalid",
+        );
       }
-      const clientKey = clientSessionId === undefined ? undefined : `${environment.id}:${clientSessionId}`;
+      const clientKey =
+        clientSessionId === undefined ? undefined : `${environment.id}:${clientSessionId}`;
       const previousId = clientKey === undefined ? undefined : interactiveClientKeys.get(clientKey);
       const previous = previousId === undefined ? undefined : interactiveSessions.get(previousId);
       if (previous) {
         const priorOptions = previous.processOptions;
-        const environmentEntries = (value: Readonly<Record<string, string>> | undefined) => Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right));
-        const sameOptions = JSON.stringify([previous.command, priorOptions.cwd ?? ".", environmentEntries(priorOptions.environment)]) ===
+        const environmentEntries = (value: Readonly<Record<string, string>> | undefined) =>
+          Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right));
+        const sameOptions =
+          JSON.stringify([
+            previous.command,
+            priorOptions.cwd ?? ".",
+            environmentEntries(priorOptions.environment),
+          ]) ===
           JSON.stringify([command, process.cwd ?? ".", environmentEntries(process.environment)]);
-        if (!sameOptions) throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Client session key is already bound to a different process");
+        if (!sameOptions)
+          throw new EnvironmentManagerError(
+            "OWNERSHIP_MISMATCH",
+            "Client session key is already bound to a different process",
+          );
         return { sessionId: previous.sessionId, outputSequence: previous.sequence };
       }
       if (interactiveSessions.size >= MAX_INTERACTIVE_SESSIONS) {
         const completed = [...interactiveSessions.entries()].find(([, entry]) => entry.done);
-        if (!completed) throw new EnvironmentManagerError("BACKEND_FAILURE", "Interactive session capacity has been reached");
+        if (!completed)
+          throw new EnvironmentManagerError(
+            "BACKEND_FAILURE",
+            "Interactive session capacity has been reached",
+          );
         interactiveSessions.delete(completed[0]);
         if (completed[1].clientKey) interactiveClientKeys.delete(completed[1].clientKey);
       }
-      const session = await backendCall("start interactive process", () => processBackend.startInteractive!(environment, command, process));
+      const session = await backendCall("start interactive process", () =>
+        processBackend.startInteractive!(environment, command, process),
+      );
       const sessionId = randomUUID();
       const entry: InteractiveEntry = {
-        identity: environment, session, sessionId,
+        identity: environment,
+        session,
+        sessionId,
         ...(clientKey === undefined ? {} : { clientKey }),
-        command: [...command], processOptions: { ...process },
-        events: [], bufferedBytes: 0, sequence: 0, done: false, attached: false,
+        command: [...command],
+        processOptions: { ...process },
+        events: [],
+        bufferedBytes: 0,
+        sequence: 0,
+        done: false,
+        attached: false,
+        wake: undefined,
+        wakeSpace: undefined,
       };
       interactiveSessions.set(sessionId, entry);
       if (clientKey) interactiveClientKeys.set(clientKey, sessionId);
@@ -600,8 +873,14 @@ export function createEnvironmentManager(
           for await (const data of session.output) {
             for (let offset = 0; offset < data.byteLength; offset += MAX_INTERACTIVE_BUFFER_BYTES) {
               const chunk = data.slice(offset, offset + MAX_INTERACTIVE_BUFFER_BYTES);
-              while (!entry.done && (entry.bufferedBytes + chunk.byteLength > MAX_INTERACTIVE_BUFFER_BYTES || entry.events.length >= MAX_INTERACTIVE_BUFFER_EVENTS)) {
-                await new Promise<void>((resolve) => { entry.wakeSpace = resolve; });
+              while (
+                !entry.done &&
+                (entry.bufferedBytes + chunk.byteLength > MAX_INTERACTIVE_BUFFER_BYTES ||
+                  entry.events.length >= MAX_INTERACTIVE_BUFFER_EVENTS)
+              ) {
+                await new Promise<void>((resolve) => {
+                  entry.wakeSpace = resolve;
+                });
               }
               if (entry.done) break;
               entry.events.push({ type: "output", sequence: ++entry.sequence, data: chunk });
@@ -613,7 +892,11 @@ export function createEnvironmentManager(
           }
           if (!entry.done) entry.result = await session.result;
         } catch {
-          try { await session.terminate(); } catch { /* Release process resources after output transport failure. */ }
+          try {
+            await session.terminate();
+          } catch {
+            /* Release process resources after output transport failure. */
+          }
           entry.result = { exitCode: null, cancelled: true };
         } finally {
           entry.done = true;
@@ -625,26 +908,61 @@ export function createEnvironmentManager(
     });
   };
 
-  const writeInteractive: EnvironmentManager["writeInteractive"] = async (request, sessionId, data) => {
-    if (!(data instanceof Uint8Array) || data.byteLength > 65_536) throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive input must be at most 64 KiB");
+  const writeInteractive: EnvironmentManager["writeInteractive"] = async (
+    request,
+    sessionId,
+    data,
+  ) => {
+    if (!(data instanceof Uint8Array) || data.byteLength > 65_536)
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Interactive input must be at most 64 KiB",
+      );
     const { session } = await resolveInteractiveSession(request, sessionId);
     await backendCall("write interactive input", () => session.write(data));
   };
 
-  const resizeInteractive: EnvironmentManager["resizeInteractive"] = async (request, sessionId, columns, rows) => {
-    if (!Number.isSafeInteger(columns) || !Number.isSafeInteger(rows) || columns < 1 || rows < 1 || columns > 500 || rows > 500) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Terminal dimensions must be between 1 and 500 columns and rows");
+  const resizeInteractive: EnvironmentManager["resizeInteractive"] = async (
+    request,
+    sessionId,
+    columns,
+    rows,
+  ) => {
+    if (
+      !Number.isSafeInteger(columns) ||
+      !Number.isSafeInteger(rows) ||
+      columns < 1 ||
+      rows < 1 ||
+      columns > 500 ||
+      rows > 500
+    ) {
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Terminal dimensions must be between 1 and 500 columns and rows",
+      );
     }
     const { session } = await resolveInteractiveSession(request, sessionId);
     await backendCall("resize interactive process", () => session.resize(columns, rows));
   };
 
-  const attachInteractiveOutput: EnvironmentManager["attachInteractiveOutput"] = async function* (request, sessionId, afterSequence = 0) {
+  const attachInteractiveOutput: EnvironmentManager["attachInteractiveOutput"] = async function* (
+    request,
+    sessionId,
+    afterSequence = 0,
+  ) {
     const entry = await resolveInteractiveSession(request, sessionId);
-    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || afterSequence > entry.sequence) {
+    if (
+      !Number.isSafeInteger(afterSequence) ||
+      afterSequence < 0 ||
+      afterSequence > entry.sequence
+    ) {
       throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive output cursor is invalid");
     }
-    if (entry.attached) throw new EnvironmentManagerError("BACKEND_FAILURE", "Interactive output already has an attached reader");
+    if (entry.attached)
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Interactive output already has an attached reader",
+      );
     entry.events = entry.events.filter((event) => event.sequence > afterSequence);
     entry.bufferedBytes = entry.events.reduce((total, event) => total + event.data.byteLength, 0);
     entry.wakeSpace?.();
@@ -660,23 +978,30 @@ export function createEnvironmentManager(
           // Retire only after the consumer asks for the next event. If it
           // disconnects between reads, the last delivered chunk stays replayable.
           entry.events = entry.events.filter((event) => event.sequence > cursor);
-          entry.bufferedBytes = entry.events.reduce((total, event) => total + event.data.byteLength, 0);
-          entry.wakeSpace?.();
-          entry.wakeSpace = undefined;
+          entry.bufferedBytes = entry.events.reduce(
+            (total, event) => total + event.data.byteLength,
+            0,
+          );
+          wakeForSpace(entry);
           continue;
         }
         if (entry.done) {
           yield { type: "exit", result: entry.result ?? { exitCode: null, cancelled: true } };
           return;
         }
-        await new Promise<void>((resolve) => { entry.wake = resolve; });
+        await new Promise<void>((resolve) => {
+          entry.wake = resolve;
+        });
       }
     } finally {
       entry.attached = false;
     }
   };
 
-  const terminateInteractive: EnvironmentManager["terminateInteractive"] = async (request, sessionId) => {
+  const terminateInteractive: EnvironmentManager["terminateInteractive"] = async (
+    request,
+    sessionId,
+  ) => {
     const entry = await resolveInteractiveSession(request, sessionId);
     await backendCall("terminate interactive process", () => entry.session.terminate());
     interactiveSessions.delete(sessionId);
@@ -689,62 +1014,141 @@ export function createEnvironmentManager(
   const resolveManagedSession = async (request: EnvironmentRequest, sessionId: string) => {
     const expected = await identity(request);
     const entry = managedSessions.get(sessionId);
-    if (!entry) throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Managed process session was not found");
-    if (entry.identity.id !== expected.id || entry.identity.ownerId !== expected.ownerId || entry.identity.workspaceId !== expected.workspaceId) {
-      throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Managed process session belongs to another environment");
+    if (!entry)
+      throw new EnvironmentManagerError(
+        "ENVIRONMENT_NOT_FOUND",
+        "Managed process session was not found",
+      );
+    if (
+      entry.identity.id !== expected.id ||
+      entry.identity.ownerId !== expected.ownerId ||
+      entry.identity.workspaceId !== expected.workspaceId
+    ) {
+      throw new EnvironmentManagerError(
+        "OWNERSHIP_MISMATCH",
+        "Managed process session belongs to another environment",
+      );
     }
     return entry;
   };
 
-  const startManagedSession: EnvironmentManager["startManagedSession"] = async (request, command, process = {}) => {
-    if (!Array.isArray(command) || command.length === 0 || command.length > 256 || command.some((part) => typeof part !== "string" || !part || part.includes("\0"))) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session command must be a non-empty argv array without NUL bytes");
+  const startManagedSession: EnvironmentManager["startManagedSession"] = async (
+    request,
+    command,
+    process = {},
+  ) => {
+    if (
+      !Array.isArray(command) ||
+      command.length === 0 ||
+      command.length > 256 ||
+      command.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+    ) {
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Managed session command must be a non-empty argv array without NUL bytes",
+      );
     }
-    const processBackend = backend as EnvironmentBackend & Partial<EnvironmentManagedProcessSessionBackend>;
-    if (typeof processBackend.startManagedSession !== "function") throw new EnvironmentManagerError("BACKEND_FAILURE", "Environment backend does not support managed process sessions");
+    const processBackend = backend as EnvironmentBackend &
+      Partial<EnvironmentManagedProcessSessionBackend>;
+    if (typeof processBackend.startManagedSession !== "function")
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Environment backend does not support managed process sessions",
+      );
     const environment = await ensure(request);
-    if (environment.status !== "ready") throw new EnvironmentManagerError("BACKEND_FAILURE", "Managed environment is not ready for process sessions");
+    if (environment.status !== "ready")
+      throw new EnvironmentManagerError(
+        "BACKEND_FAILURE",
+        "Managed environment is not ready for process sessions",
+      );
     return withIdentityLock(environment.id, async () => {
       const clientSessionId = process.clientSessionId?.trim();
-      if (clientSessionId !== undefined && (!clientSessionId || clientSessionId.length > 256 || clientSessionId.includes("\0"))) {
-        throw new EnvironmentManagerError("INVALID_REQUEST", "Managed client session ID is invalid");
+      if (
+        clientSessionId !== undefined &&
+        (!clientSessionId || clientSessionId.length > 256 || clientSessionId.includes("\0"))
+      ) {
+        throw new EnvironmentManagerError(
+          "INVALID_REQUEST",
+          "Managed client session ID is invalid",
+        );
       }
-      const clientKey = clientSessionId === undefined ? undefined : `${environment.id}:${clientSessionId}`;
-      const previousId = clientKey === undefined ? undefined : managedSessionClientKeys.get(clientKey);
+      const clientKey =
+        clientSessionId === undefined ? undefined : `${environment.id}:${clientSessionId}`;
+      const previousId =
+        clientKey === undefined ? undefined : managedSessionClientKeys.get(clientKey);
       const previous = previousId === undefined ? undefined : managedSessions.get(previousId);
       if (previous) {
-        const entries = (value: Readonly<Record<string, string>> | undefined) => Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right));
-        const sameOptions = JSON.stringify([previous.command, previous.processOptions.cwd ?? ".", entries(previous.processOptions.environment)]) ===
-          JSON.stringify([command, process.cwd ?? ".", entries(process.environment)]);
-        if (!sameOptions) throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Client session key is already bound to a different process");
+        const entries = (value: Readonly<Record<string, string>> | undefined) =>
+          Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right));
+        const sameOptions =
+          JSON.stringify([
+            previous.command,
+            previous.processOptions.cwd ?? ".",
+            entries(previous.processOptions.environment),
+          ]) === JSON.stringify([command, process.cwd ?? ".", entries(process.environment)]);
+        if (!sameOptions)
+          throw new EnvironmentManagerError(
+            "OWNERSHIP_MISMATCH",
+            "Client session key is already bound to a different process",
+          );
         return { sessionId: previous.sessionId, outputSequence: previous.sequence };
       }
       if (managedSessions.size >= MAX_INTERACTIVE_SESSIONS) {
         const completed = [...managedSessions.entries()].find(([, entry]) => entry.done);
-        if (!completed) throw new EnvironmentManagerError("BACKEND_FAILURE", "Managed process session capacity has been reached");
+        if (!completed)
+          throw new EnvironmentManagerError(
+            "BACKEND_FAILURE",
+            "Managed process session capacity has been reached",
+          );
         managedSessions.delete(completed[0]);
         if (completed[1].clientKey) managedSessionClientKeys.delete(completed[1].clientKey);
       }
-      const session = await backendCall("start managed process session", () => processBackend.startManagedSession!(environment, command, process));
+      const session = await backendCall("start managed process session", () =>
+        processBackend.startManagedSession!(environment, command, process),
+      );
       const sessionId = randomUUID();
       const entry: ManagedSessionEntry = {
-        identity: environment, session, sessionId,
+        identity: environment,
+        session,
+        sessionId,
         ...(clientKey === undefined ? {} : { clientKey }),
-        command: [...command], processOptions: { ...process },
-        events: [], bufferedBytes: 0, sequence: 0, done: false, attached: false,
+        command: [...command],
+        processOptions: { ...process },
+        events: [],
+        bufferedBytes: 0,
+        sequence: 0,
+        done: false,
+        attached: false,
+        wake: undefined,
+        wakeSpace: undefined,
       };
       managedSessions.set(sessionId, entry);
       if (clientKey) managedSessionClientKeys.set(clientKey, sessionId);
       void (async () => {
         try {
           for await (const output of session.output) {
-            for (let offset = 0; offset < output.data.byteLength; offset += MAX_INTERACTIVE_BUFFER_BYTES) {
+            for (
+              let offset = 0;
+              offset < output.data.byteLength;
+              offset += MAX_INTERACTIVE_BUFFER_BYTES
+            ) {
               const data = output.data.slice(offset, offset + MAX_INTERACTIVE_BUFFER_BYTES);
-              while (!entry.done && (entry.bufferedBytes + data.byteLength > MAX_INTERACTIVE_BUFFER_BYTES || entry.events.length >= MAX_INTERACTIVE_BUFFER_EVENTS)) {
-                await new Promise<void>((resolve) => { entry.wakeSpace = resolve; });
+              while (
+                !entry.done &&
+                (entry.bufferedBytes + data.byteLength > MAX_INTERACTIVE_BUFFER_BYTES ||
+                  entry.events.length >= MAX_INTERACTIVE_BUFFER_EVENTS)
+              ) {
+                await new Promise<void>((resolve) => {
+                  entry.wakeSpace = resolve;
+                });
               }
               if (entry.done) break;
-              entry.events.push({ type: "output", stream: output.stream, sequence: ++entry.sequence, data });
+              entry.events.push({
+                type: "output",
+                stream: output.stream,
+                sequence: ++entry.sequence,
+                data,
+              });
               entry.bufferedBytes += data.byteLength;
               entry.wake?.();
               entry.wake = undefined;
@@ -753,7 +1157,11 @@ export function createEnvironmentManager(
           }
           if (!entry.done) entry.result = await session.result;
         } catch {
-          try { await session.terminate(); } catch { /* Release process resources after output transport failure. */ }
+          try {
+            await session.terminate();
+          } catch {
+            /* Release process resources after output transport failure. */
+          }
           entry.result = { exitCode: null, cancelled: true };
         } finally {
           entry.done = true;
@@ -767,7 +1175,10 @@ export function createEnvironmentManager(
 
   const startPortTunnel: EnvironmentManager["startPortTunnel"] = async (request, port) => {
     if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-      throw new EnvironmentManagerError("INVALID_REQUEST", "Port tunnel target must be a valid TCP port");
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Port tunnel target must be a valid TCP port",
+      );
     }
     // Keep the command manager-owned: callers select only a port, and the
     // worker can connect only to its own loopback namespace.
@@ -788,46 +1199,74 @@ export function createEnvironmentManager(
     });
   };
 
-  const writeManagedSession: EnvironmentManager["writeManagedSession"] = async (request, sessionId, data) => {
-    if (!(data instanceof Uint8Array) || data.byteLength > 65_536) throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session input must be at most 64 KiB");
+  const writeManagedSession: EnvironmentManager["writeManagedSession"] = async (
+    request,
+    sessionId,
+    data,
+  ) => {
+    if (!(data instanceof Uint8Array) || data.byteLength > 65_536)
+      throw new EnvironmentManagerError(
+        "INVALID_REQUEST",
+        "Managed session input must be at most 64 KiB",
+      );
     const { session } = await resolveManagedSession(request, sessionId);
     await backendCall("write managed session input", () => session.write(data));
   };
 
-  const attachManagedSessionOutput: EnvironmentManager["attachManagedSessionOutput"] = async function* (request, sessionId, afterSequence = 0) {
-    const entry = await resolveManagedSession(request, sessionId);
-    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0 || afterSequence > entry.sequence) throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session output cursor is invalid");
-    if (entry.attached) throw new EnvironmentManagerError("BACKEND_FAILURE", "Managed session output already has an attached reader");
-    entry.events = entry.events.filter((event) => event.sequence > afterSequence);
-    entry.bufferedBytes = entry.events.reduce((total, event) => total + event.data.byteLength, 0);
-    entry.wakeSpace?.();
-    entry.wakeSpace = undefined;
-    entry.attached = true;
-    let cursor = afterSequence;
-    try {
-      while (true) {
-        const next = entry.events.find((event) => event.sequence > cursor);
-        if (next) {
-          cursor = next.sequence;
-          yield next;
-          entry.events = entry.events.filter((event) => event.sequence > cursor);
-          entry.bufferedBytes = entry.events.reduce((total, event) => total + event.data.byteLength, 0);
-          entry.wakeSpace?.();
-          entry.wakeSpace = undefined;
-          continue;
+  const attachManagedSessionOutput: EnvironmentManager["attachManagedSessionOutput"] =
+    async function* (request, sessionId, afterSequence = 0) {
+      const entry = await resolveManagedSession(request, sessionId);
+      if (
+        !Number.isSafeInteger(afterSequence) ||
+        afterSequence < 0 ||
+        afterSequence > entry.sequence
+      )
+        throw new EnvironmentManagerError(
+          "INVALID_REQUEST",
+          "Managed session output cursor is invalid",
+        );
+      if (entry.attached)
+        throw new EnvironmentManagerError(
+          "BACKEND_FAILURE",
+          "Managed session output already has an attached reader",
+        );
+      entry.events = entry.events.filter((event) => event.sequence > afterSequence);
+      entry.bufferedBytes = entry.events.reduce((total, event) => total + event.data.byteLength, 0);
+      entry.wakeSpace?.();
+      entry.wakeSpace = undefined;
+      entry.attached = true;
+      let cursor = afterSequence;
+      try {
+        while (true) {
+          const next = entry.events.find((event) => event.sequence > cursor);
+          if (next) {
+            cursor = next.sequence;
+            yield next;
+            entry.events = entry.events.filter((event) => event.sequence > cursor);
+            entry.bufferedBytes = entry.events.reduce(
+              (total, event) => total + event.data.byteLength,
+              0,
+            );
+            wakeForSpace(entry);
+            continue;
+          }
+          if (entry.done) {
+            yield { type: "exit", result: entry.result ?? { exitCode: null, cancelled: true } };
+            return;
+          }
+          await new Promise<void>((resolve) => {
+            entry.wake = resolve;
+          });
         }
-        if (entry.done) {
-          yield { type: "exit", result: entry.result ?? { exitCode: null, cancelled: true } };
-          return;
-        }
-        await new Promise<void>((resolve) => { entry.wake = resolve; });
+      } finally {
+        entry.attached = false;
       }
-    } finally {
-      entry.attached = false;
-    }
-  };
+    };
 
-  const terminateManagedSession: EnvironmentManager["terminateManagedSession"] = async (request, sessionId) => {
+  const terminateManagedSession: EnvironmentManager["terminateManagedSession"] = async (
+    request,
+    sessionId,
+  ) => {
     const entry = await resolveManagedSession(request, sessionId);
     await backendCall("terminate managed process session", () => entry.session.terminate());
     managedSessions.delete(sessionId);
@@ -839,24 +1278,36 @@ export function createEnvironmentManager(
 
   const closeManagedSessions: EnvironmentManager["closeManagedSessions"] = async () => {
     const entries = [...managedSessions.values()];
-    await Promise.all(entries.map(async (entry) => {
-      try { await entry.session.terminate(); } catch { /* Continue cleaning up other sessions. */ }
-      entry.done = true;
-      entry.wake?.();
-      entry.wakeSpace?.();
-    }));
+    await Promise.all(
+      entries.map(async (entry) => {
+        try {
+          await entry.session.terminate();
+        } catch {
+          /* Continue cleaning up other sessions. */
+        }
+        entry.done = true;
+        entry.wake?.();
+        entry.wakeSpace?.();
+      }),
+    );
     managedSessions.clear();
     managedSessionClientKeys.clear();
   };
 
   const closeInteractiveSessions: EnvironmentManager["closeInteractiveSessions"] = async () => {
     const entries = [...interactiveSessions.values()];
-    await Promise.all(entries.map(async (entry) => {
-      try { await entry.session.terminate(); } catch { /* Continue cleaning up other sessions. */ }
-      entry.done = true;
-      entry.wake?.();
-      entry.wakeSpace?.();
-    }));
+    await Promise.all(
+      entries.map(async (entry) => {
+        try {
+          await entry.session.terminate();
+        } catch {
+          /* Continue cleaning up other sessions. */
+        }
+        entry.done = true;
+        entry.wake?.();
+        entry.wakeSpace?.();
+      }),
+    );
     interactiveSessions.clear();
     interactiveClientKeys.clear();
   };
@@ -864,51 +1315,94 @@ export function createEnvironmentManager(
   const reconcile: EnvironmentManager["reconcile"] = async () => {
     if (!registrations) return [];
     const saved = await registrations.loadAll();
-    return Promise.all(saved.map(async ({ environment }) => withIdentityLock(environment.id, async () => {
-      try {
-        let currentIdentity: EnvironmentIdentity;
-        try {
-          currentIdentity = await identity(environment);
-        } catch (cause) {
-          throw new EnvironmentManagerError(
-            "OWNERSHIP_MISMATCH",
-            "Registered environment is stale because its storage root or worktree no longer resolves",
-            { cause },
-          );
-        }
-        if (currentIdentity.id !== environment.id) {
-          throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Registered environment path no longer resolves to its original identity");
-        }
-        // Startup reconciliation observes Docker state; it must not create or
-        // start containers. In particular, a missing container is reported
-        // while its registration remains available for explicit recovery.
-        const current = await inspect(currentIdentity);
-        if (!current) {
-          throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Registered environment container is missing");
-        }
-        // A pending ID is only written before create() returns. In that one
-        // crash window the backend may safely adopt the resource after its
-        // full identity/configuration inspection. Once a resource ID has been
-        // recorded, a different Docker object at the same stable name is not
-        // the registered resource and must not silently replace its binding.
-        const creationWasInterruptedBeforeResourceIdWasSaved = environment.resourceId === `pending:${environment.id}`;
-        if (!creationWasInterruptedBeforeResourceIdWasSaved && current.resourceId !== environment.resourceId) {
-          throw new EnvironmentManagerError(
-            "OWNERSHIP_MISMATCH",
-            "Registered environment resource no longer matches the verified backend resource",
-          );
-        }
-        return { environmentId: environment.id, environment: await persist(current) };
-      } catch (error) {
-        return {
-          environmentId: environment.id,
-          error: error instanceof EnvironmentManagerError
-            ? error
-            : new EnvironmentManagerError("BACKEND_FAILURE", "Environment reconciliation failed", { cause: error }),
-        };
-      }
-    })));
+    return Promise.all(
+      saved.map(async ({ environment }) =>
+        withIdentityLock(environment.id, async () => {
+          try {
+            let currentIdentity: EnvironmentIdentity;
+            try {
+              currentIdentity = await identity(environment);
+            } catch (cause) {
+              throw new EnvironmentManagerError(
+                "OWNERSHIP_MISMATCH",
+                "Registered environment is stale because its storage root or worktree no longer resolves",
+                { cause },
+              );
+            }
+            if (currentIdentity.id !== environment.id) {
+              throw new EnvironmentManagerError(
+                "OWNERSHIP_MISMATCH",
+                "Registered environment path no longer resolves to its original identity",
+              );
+            }
+            // Startup reconciliation observes Docker state; it must not create or
+            // start containers. In particular, a missing container is reported
+            // while its registration remains available for explicit recovery.
+            const current = await inspect(currentIdentity);
+            if (!current) {
+              throw new EnvironmentManagerError(
+                "ENVIRONMENT_NOT_FOUND",
+                "Registered environment container is missing",
+              );
+            }
+            // A pending ID is only written before create() returns. In that one
+            // crash window the backend may safely adopt the resource after its
+            // full identity/configuration inspection. Once a resource ID has been
+            // recorded, a different Docker object at the same stable name is not
+            // the registered resource and must not silently replace its binding.
+            const creationWasInterruptedBeforeResourceIdWasSaved =
+              environment.resourceId === `pending:${environment.id}`;
+            if (
+              !creationWasInterruptedBeforeResourceIdWasSaved &&
+              current.resourceId !== environment.resourceId
+            ) {
+              throw new EnvironmentManagerError(
+                "OWNERSHIP_MISMATCH",
+                "Registered environment resource no longer matches the verified backend resource",
+              );
+            }
+            return { environmentId: environment.id, environment: await persist(current) };
+          } catch (error) {
+            return {
+              environmentId: environment.id,
+              error:
+                error instanceof EnvironmentManagerError
+                  ? error
+                  : new EnvironmentManagerError(
+                      "BACKEND_FAILURE",
+                      "Environment reconciliation failed",
+                      { cause: error },
+                    ),
+            };
+          }
+        }),
+      ),
+    );
   };
 
-  return { identity, ensure, start, stop, restart, remove, execute, startInteractive, writeInteractive, resizeInteractive, attachInteractiveOutput, terminateInteractive, closeInteractiveSessions, startManagedSession, startPortTunnel, writeManagedSession, attachManagedSessionOutput, terminateManagedSession, closeManagedSessions, reconcile, list, inspect: inspectRegistered, rebuild };
+  return {
+    identity,
+    ensure,
+    start,
+    stop,
+    restart,
+    remove,
+    execute,
+    startInteractive,
+    writeInteractive,
+    resizeInteractive,
+    attachInteractiveOutput,
+    terminateInteractive,
+    closeInteractiveSessions,
+    startManagedSession,
+    startPortTunnel,
+    writeManagedSession,
+    attachManagedSessionOutput,
+    terminateManagedSession,
+    closeManagedSessions,
+    reconcile,
+    list,
+    inspect: inspectRegistered,
+    rebuild,
+  };
 }

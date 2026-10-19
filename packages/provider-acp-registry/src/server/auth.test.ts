@@ -82,9 +82,16 @@ const makeHarness = (
       credentials: () =>
         Effect.succeed({
           binding: { owner: "t3" as const, key: "instance" },
-          get: Effect.sync(() => piCredentialBytes ? Option.some(piCredentialBytes) : Option.none()),
-          set: (value: Uint8Array) => Effect.sync(() => { piCredentialBytes = value; }),
-          remove: Effect.sync(() => { piCredentialBytes = undefined; }),
+          get: Effect.sync(() =>
+            piCredentialBytes ? Option.some(piCredentialBytes) : Option.none(),
+          ),
+          set: (value: Uint8Array) =>
+            Effect.sync(() => {
+              piCredentialBytes = value;
+            }),
+          remove: Effect.sync(() => {
+            piCredentialBytes = undefined;
+          }),
         }),
     };
     const controller = yield* makeAcpRegistryAuth({
@@ -223,9 +230,8 @@ const makeHarness = (
       killed: () => killed,
       written,
       sizes,
-      piCredentialStore: () => piCredentialBytes
-        ? JSON.parse(new TextDecoder().decode(piCredentialBytes))
-        : undefined,
+      piCredentialStore: () =>
+        piCredentialBytes ? JSON.parse(new TextDecoder().decode(piCredentialBytes)) : undefined,
       runtimes: () => runtimes,
       setVersion: (value: string) => {
         version = value;
@@ -312,18 +318,20 @@ it.effect("stores an allowlisted Pi credential from T3's masked auth interaction
       }),
     );
     const flow = yield* h.controller.start("owner", Effect.void, "t3-subpolar-pi-credential");
+    if (flow.flowId === null) return yield* Effect.die("Auth flow did not return an ID");
+    const flowId = flow.flowId;
     const waiting = yield* h.phase("waiting");
     assert.isTrue(waiting.methods?.some((method) => method.id === "t3-subpolar-pi-credential"));
     assert.deepEqual(waiting.interaction, {
       type: "credentials",
-      id: flow.flowId,
+      id: flowId,
       fields: [{ name: "credentialJson", label: "Pi credential JSON", secret: true }],
     });
     const secret = "pi-api-key-canary";
     yield* h.controller.respond!("owner", {
       instanceId,
-      flowId: flow.flowId!,
-      interactionId: flow.flowId!,
+      flowId,
+      interactionId: flowId,
       response: {
         type: "credentials",
         values: {

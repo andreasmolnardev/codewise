@@ -1,5 +1,6 @@
 import * as Config from "effect/Config";
 import * as Console from "effect/Console";
+import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -7,10 +8,11 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { Argument, Command, Flag } from "effect/cli";
 import * as CliError from "effect/cli/CliError";
-import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
+import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import {
   parseSubpolarAgentProfile,
   parseSubpolarAgentProfilesConfig,
+  SubpolarAgentProfilesConfig as SubpolarAgentProfilesConfigSchema,
   type SubpolarAgentProfile,
   type SubpolarAgentProfilesConfig,
 } from "@t3tools/provider-acp-registry/server/subpolarAgentProfileConfig";
@@ -46,6 +48,175 @@ const stateFilePath = Effect.fn(function* (baseDirOption: Option.Option<string>)
 const userError = (message: string, cause?: unknown) =>
   new CliError.UserError({ cause: cause ?? message, userMessage: message });
 
+const ProfileLock = Schema.Struct({ pid: Schema.Int, token: Schema.String });
+const ProfileLockJson = Schema.fromJsonString(ProfileLock);
+const decodeProfileLock = Schema.decodeUnknownSync(ProfileLockJson);
+const encodeProfileLock = Schema.encodeSync(ProfileLockJson);
+const encodePrettyJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown, { space: 2 }));
+const encodeProfilesConfig = Schema.encodeSync(
+  Schema.fromJsonString(SubpolarAgentProfilesConfigSchema, { space: 2 }),
+);
+
+function parseProfileLock(raw: string) {
+  try {
+    return decodeProfileLock(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+const LOCK_RETRY_COUNT = 600;
+const LOCK_RETRY_DELAY = "50 millis";
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return !(error instanceof Error && "code" in error && error.code === "ESRCH");
+  }
+}
+
+const readLockOwner = Effect.fn(function* (lockPath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs.readFileString(lockPath).pipe(
+    Effect.map((raw) => {
+      const lock = parseProfileLock(raw);
+      return lock === undefined ? undefined : { pid: lock.pid };
+    }),
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed(undefined),
+    ),
+    Effect.mapError((cause) => userError(`Could not inspect profile lock ${lockPath}.`, cause)),
+  );
+});
+
+const tryAcquireLockFile = Effect.fn(function* (lockPath: string, token: string) {
+  const fs = yield* FileSystem.FileSystem;
+  return yield* fs
+    .writeFileString(lockPath, encodeProfileLock({ pid: process.pid, token }), { flag: "wx" })
+    .pipe(
+      Effect.as(true),
+      Effect.catch((error) =>
+        error.reason._tag === "AlreadyExists" ? Effect.succeed(false) : Effect.fail(error),
+      ),
+    );
+});
+
+const acquireRecoveryGuard = Effect.fn(function* (lockPath: string) {
+  const guardPath = `${lockPath}.recovery`;
+  const crypto = yield* Crypto.Crypto;
+  const token = yield* crypto
+    .randomUUIDv4()
+    .pipe(Effect.mapError((cause) => userError("Could not create profile recovery lock.", cause)));
+  for (let attempt = 0; attempt < LOCK_RETRY_COUNT; attempt += 1) {
+    if (yield* tryAcquireLockFile(guardPath, token)) return { lockPath: guardPath, token };
+    yield* Effect.sleep(LOCK_RETRY_DELAY);
+  }
+  return yield* Effect.fail(
+    userError(
+      `Timed out waiting for profile lock recovery guard ${guardPath}. If no T3 process is changing profiles, remove this stale guard and retry.`,
+    ),
+  );
+});
+
+const acquireConfigLock = Effect.fn(function* (filePath: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const lockPath = `${filePath}.lock`;
+  const crypto = yield* Crypto.Crypto;
+  const token = yield* crypto
+    .randomUUIDv4()
+    .pipe(Effect.mapError((cause) => userError("Could not create profile lock.", cause)));
+  yield* fs.makeDirectory(path.dirname(filePath), { recursive: true });
+  for (let attempt = 0; attempt < LOCK_RETRY_COUNT; attempt += 1) {
+    const acquired = yield* tryAcquireLockFile(lockPath, token);
+    if (acquired) {
+      return {
+        lockPath,
+        token,
+      };
+    }
+
+    const lock = yield* readLockOwner(lockPath);
+    if (lock !== undefined && !isProcessAlive(lock.pid)) {
+      const guard = yield* acquireRecoveryGuard(lockPath);
+      yield* Effect.gen(function* () {
+        // Another reaper may have replaced the stale lock while this process waited for the guard.
+        const current = yield* readLockOwner(lockPath);
+        if (current !== undefined && !isProcessAlive(current.pid)) {
+          const abandonedToken = yield* crypto
+            .randomUUIDv4()
+            .pipe(Effect.mapError((cause) => userError("Could not recover profile lock.", cause)));
+          const abandonedPath = `${lockPath}.abandoned-${abandonedToken}`;
+          yield* fs.rename(lockPath, abandonedPath).pipe(
+            Effect.catchIf(
+              (error) => error.reason._tag === "NotFound",
+              () => Effect.void,
+            ),
+            Effect.flatMap(() => fs.remove(abandonedPath, { force: true }).pipe(Effect.ignore)),
+            Effect.mapError((cause) =>
+              userError(`Could not recover profile lock ${lockPath}.`, cause),
+            ),
+          );
+        }
+      }).pipe(Effect.ensuring(releaseConfigLock(guard).pipe(Effect.ignore({ log: true }))));
+      if (lock !== undefined && !isProcessAlive(lock.pid)) {
+        // Retry the main lock acquisition after inspecting or removing the stale owner under guard.
+        const current = yield* readLockOwner(lockPath);
+        if (current === undefined || !isProcessAlive(current.pid)) continue;
+      }
+    }
+    yield* Effect.sleep(LOCK_RETRY_DELAY);
+  }
+  return yield* Effect.fail(userError(`Timed out waiting for profile lock ${lockPath}.`));
+});
+
+const releaseConfigLock = Effect.fn(function* (lock: { lockPath: string; token: string }) {
+  const fs = yield* FileSystem.FileSystem;
+  const raw = yield* fs.readFileString(lock.lockPath).pipe(
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed(undefined),
+    ),
+    Effect.mapError((cause) =>
+      userError(`Could not inspect profile lock ${lock.lockPath}.`, cause),
+    ),
+  );
+  if (raw === undefined) return;
+  const owner = parseProfileLock(raw);
+  if (owner?.token === lock.token) {
+    yield* fs
+      .remove(lock.lockPath)
+      .pipe(
+        Effect.mapError((cause) =>
+          userError(`Could not release profile lock ${lock.lockPath}.`, cause),
+        ),
+      );
+  }
+});
+
+const writePrivateConfigAtomically = Effect.fn(function* (filePath: string, contents: string) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const directory = path.dirname(filePath);
+  yield* fs.makeDirectory(directory, { recursive: true });
+  yield* Effect.scoped(
+    Effect.gen(function* () {
+      const temporaryDirectory = yield* Effect.acquireRelease(
+        fs.makeTempDirectory({ directory, prefix: `${path.basename(filePath)}.` }),
+        (tempDir) => fs.remove(tempDir, { recursive: true }).pipe(Effect.ignore({ log: true })),
+      );
+      const temporaryFile = path.join(temporaryDirectory, "contents.tmp");
+      yield* fs.writeFileString(temporaryFile, contents);
+      // Protect instructions and other private profile contents before the atomic rename publishes it.
+      yield* fs.chmod(temporaryFile, 0o600);
+      yield* fs.rename(temporaryFile, filePath);
+    }),
+  ).pipe(Effect.mapError((cause) => userError(`Could not save ${filePath}.`, cause)));
+});
+
 const readConfig = Effect.fn(function* (filePath: string) {
   const fs = yield* FileSystem.FileSystem;
   const exists = yield* fs
@@ -69,42 +240,44 @@ const saveConfig = Effect.fn(function* (
   update: (config: SubpolarAgentProfilesConfig) => SubpolarAgentProfilesConfig,
 ) {
   const fs = yield* FileSystem.FileSystem;
-  for (let attempt = 0; attempt < 5; attempt += 1) {
-    const { raw, config } = yield* readConfig(filePath);
+  const targetPath = yield* resolveSymlinkTarget(filePath);
+  const lock = yield* acquireConfigLock(targetPath);
+  return yield* Effect.gen(function* () {
+    const { raw, config } = yield* readConfig(targetPath);
     let next: SubpolarAgentProfilesConfig;
     try {
       next = update(config);
     } catch (cause) {
       return yield* Effect.fail(
-        cause instanceof CliError.UserError
+        Schema.is(CliError.UserError)(cause)
           ? cause
           : userError("Could not update profiles.", cause),
       );
     }
-    const contents = `${JSON.stringify(next, null, 2)}\n`;
-    const current = yield* fs.readFileString(filePath).pipe(
-      Effect.catchIf(
-        (error) => error.reason._tag === "NotFound",
-        () => Effect.succeed(undefined),
-      ),
-      Effect.mapError((cause) => userError(`Could not re-read ${filePath} before saving.`, cause)),
-    );
-    if (current !== raw) continue;
-    yield* writeFileStringAtomically({ filePath, contents }).pipe(
-      Effect.mapError((cause) => userError(`Could not save ${filePath}.`, cause)),
-    );
+    const contents = `${encodeProfilesConfig(next)}\n`;
+    if (raw === undefined) {
+      const exists = yield* fs
+        .exists(targetPath)
+        .pipe(Effect.mapError((cause) => userError(`Could not inspect ${targetPath}.`, cause)));
+      if (exists) {
+        return yield* Effect.fail(userError(`${targetPath} changed while saving. Try again.`));
+      }
+    }
+    yield* writePrivateConfigAtomically(targetPath, contents);
     return next;
-  }
-  return yield* Effect.fail(userError(`${filePath} kept changing while saving. Try again.`));
+  }).pipe(Effect.ensuring(releaseConfigLock(lock).pipe(Effect.ignore({ log: true }))));
 });
 
-function withProvider(config: SubpolarAgentProfilesConfig, providerInstanceId: string) {
+function withProvider(
+  config: SubpolarAgentProfilesConfig,
+  providerInstanceId: string,
+): SubpolarAgentProfilesConfig["providers"][string] {
   return config.providers[providerInstanceId] ?? { profiles: [] };
 }
 
 function selectedView(provider: {
   profiles: readonly SubpolarAgentProfile[];
-  selectedProfileId?: string;
+  selectedProfileId?: string | undefined;
 }) {
   return provider.profiles.map(({ id, name }) => ({
     id,
@@ -132,7 +305,7 @@ const listCommand = Command.make("list", {
       };
       yield* Console.log(
         flags.json
-          ? JSON.stringify(result, null, 2)
+          ? encodePrettyJson(result)
           : profiles.length
             ? profiles
                 .map((profile) => `${profile.selected ? "*" : " "} ${profile.id}\t${profile.name}`)
@@ -187,7 +360,7 @@ const addCommand = Command.make("add", {
       )!;
       yield* Console.log(
         flags.json
-          ? JSON.stringify({
+          ? encodePrettyJson({
               ok: true,
               providerInstanceId: flags.providerInstance,
               profile: { id: added.id, name: added.name },
@@ -223,7 +396,7 @@ const selectCommand = Command.make("select", {
       });
       yield* Console.log(
         flags.json
-          ? JSON.stringify({
+          ? encodePrettyJson({
               ok: true,
               providerInstanceId: flags.providerInstance,
               selectedProfileId: next.providers[flags.providerInstance]!.selectedProfileId,
@@ -268,7 +441,7 @@ const removeCommand = Command.make("remove", {
       });
       yield* Console.log(
         flags.json
-          ? JSON.stringify({
+          ? encodePrettyJson({
               ok: true,
               providerInstanceId: flags.providerInstance,
               removedProfileId: flags.profileId,

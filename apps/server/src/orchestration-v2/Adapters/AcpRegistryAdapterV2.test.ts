@@ -137,6 +137,9 @@ describe("AcpRegistryAdapterV2", () => {
       authMethodId: "",
       distribution: "auto",
       customModels: [],
+      enableSubpolarCredentialBroker: false,
+      subpolarCredentialProviderId: "",
+      enableSubpolarModelEgress: false,
     });
   });
 
@@ -192,6 +195,7 @@ describe("AcpRegistryAdapterV2", () => {
         ACP_REGISTRY_PROVIDER,
       );
       const instanceId = ProviderInstanceId.make("acp-registry-mode-pick");
+      const host = yield* ProviderHost.ProviderHost;
       const adapter = yield* makeAcpRegistryAdapterV2({
         selfInvocation: yield* resolveSelfInvocation(),
         instanceId,
@@ -199,6 +203,7 @@ describe("AcpRegistryAdapterV2", () => {
           agentId: "fixture-agent",
           authMethodId: "test",
         }),
+        host,
         environment: {},
         makeRuntime: makeAcpReplayRuntime({
           transcript,
@@ -273,10 +278,12 @@ describe("AcpRegistryAdapterV2", () => {
       ) {
         let clientCapabilities: unknown;
         const instanceId = ProviderInstanceId.make(`acp-registry-capabilities-${agentId}`);
+        const host = yield* ProviderHost.ProviderHost;
         const adapter = yield* makeAcpRegistryAdapterV2({
           selfInvocation: yield* resolveSelfInvocation(),
           instanceId,
           settings: yield* decodeAcpRegistryAdapterSettings({ agentId, authMethodId: "test" }),
+          host,
           environment: {},
           makeRuntime: (input) =>
             Effect.gen(function* () {
@@ -357,6 +364,7 @@ describe("AcpRegistryAdapterV2", () => {
         selfInvocation: yield* resolveSelfInvocation(),
         instanceId,
         settings,
+        host,
         environment: {
           T3_ACP_SESSION_LIFECYCLE: "1",
           T3_ACP_COMMAND_ADVERTISEMENT_DELAY_MS: "750",

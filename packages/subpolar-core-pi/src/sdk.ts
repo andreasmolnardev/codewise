@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalDate:off -- This module adapts the native Pi SDK and filesystem API at the provider boundary.
 import { createHash } from "node:crypto";
 import path from "node:path";
 

@@ -1,8 +1,8 @@
 import { assert, it } from "@effect/vitest";
-import { randomUUID } from "node:crypto";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as AcpErrors from "effect-acp/errors";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 
 import { registerSubpolarCredentialExtension, setPiCredential } from "./subpolarCredentials.ts";
 
@@ -12,6 +12,7 @@ const credential = {
   refresh: "secret-canary-refresh",
   expires: 123,
 };
+let nextHarnessId = 0;
 
 function makeCredentialHost() {
   const records = new Map<string, Uint8Array>();
@@ -37,10 +38,10 @@ function makeCredentialHost() {
 function makeHarness(
   activeSessionId = "worker-session",
   threadId = "thread-a",
-  instanceId = `broker-test-${randomUUID()}`,
+  instanceId = `broker-test-${++nextHarnessId}`,
   host = makeCredentialHost(),
 ) {
-  let handler: ((request: unknown) => Effect.Effect<unknown, unknown>) | undefined;
+  let handler: ((request: unknown) => Effect.Effect<unknown, AcpErrors.AcpError>) | undefined;
   const context = {
     threadId,
     activeSessionId: Effect.succeed(activeSessionId),
@@ -57,7 +58,7 @@ function makeHarness(
       instanceId,
       providerIds: ["openai"],
       context: context as never,
-    }),
+    }).pipe(Effect.provide(NodeCrypto.layer)),
   );
   return {
     ready,
@@ -110,7 +111,7 @@ it("keeps Pi credential operations inside the bound ACP session and persists ref
 });
 
 it("rejects stale sessions and transactions from another T3 thread", async () => {
-  const instanceId = `broker-test-${randomUUID()}`;
+  const instanceId = `broker-test-${++nextHarnessId}`;
   const harness = makeHarness("worker-session", "thread-a", instanceId);
   const error = await harness
     .invoke({ sessionId: "other-session", operation: "read", providerId: "openai" })
@@ -201,8 +202,8 @@ it("closes a credential transaction when its submitted value is invalid", async 
 
 it("keeps seeded Pi credentials isolated per ACP provider instance", async () => {
   const host = makeCredentialHost();
-  const instanceA = `broker-instance-a-${randomUUID()}`;
-  const instanceB = `broker-instance-b-${randomUUID()}`;
+  const instanceA = `broker-instance-a-${++nextHarnessId}`;
+  const instanceB = `broker-instance-b-${++nextHarnessId}`;
   const harnessA = makeHarness("worker-a", "thread-a", instanceA, host);
   const harnessB = makeHarness("worker-b", "thread-b", instanceB, host);
 

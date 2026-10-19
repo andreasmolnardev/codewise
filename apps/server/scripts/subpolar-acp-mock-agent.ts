@@ -2,7 +2,8 @@
 import * as Layer from "effect/Layer";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { layerStdio } from "../../packages/subpolar-acp/src/index.ts";
+import { layerStdio } from "@subpolar/acp";
+import type { ToolDefinition } from "../../../packages/subpolar-contracts/src/index.ts";
 
 const tool = {
   id: "test.echo",
@@ -16,7 +17,7 @@ const tool = {
   },
   enabled: true,
   risk: "low",
-} as const;
+} satisfies ToolDefinition;
 
 const agent = layerStdio({
   toolDefinitions: [tool],
@@ -30,7 +31,9 @@ const agent = layerStdio({
         input: { value: "approved" },
       });
       await request.emit({ type: "text", data: { text: `mock Pi answered: ${request.prompt}` } });
-      return { text: `mock Pi answered: ${request.prompt}; tool result: ${JSON.stringify(toolResult)}` };
+      return {
+        text: `mock Pi answered: ${request.prompt}; tool result: ${JSON.stringify(toolResult)}`,
+      };
     },
   }),
 });

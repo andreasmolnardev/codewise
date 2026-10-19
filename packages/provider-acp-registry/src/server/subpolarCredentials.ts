@@ -1,5 +1,5 @@
-import { randomUUID } from "node:crypto";
-
+import * as Crypto from "effect/Crypto";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -12,6 +12,17 @@ const METHOD = "subpolar/credentials";
 const MAX_STORE_BYTES = 256 * 1024;
 const MAX_CREDENTIAL_BYTES = 64 * 1024;
 const MAX_TRANSACTION_MS = 30_000;
+const JsonValue = Schema.fromJsonString(Schema.Unknown);
+const encodeJson = Schema.encodeSync(JsonValue);
+const decodeJson = Schema.decodeSync(JsonValue);
+
+class PiCredentialStoreError extends Data.TaggedError("PiCredentialStoreError")<{
+  readonly detail: string;
+  readonly cause?: unknown;
+}> {}
+
+const storeError = (detail: string, cause?: unknown) =>
+  new PiCredentialStoreError({ detail, ...(cause === undefined ? {} : { cause }) });
 
 const Request = Schema.Struct({
   sessionId: Schema.String,
@@ -68,7 +79,7 @@ export function isPiCredential(value: unknown): value is Credential {
 export function parsePiCredentialStore(bytes: Uint8Array | undefined): CredentialMap {
   if (!bytes) return {};
   if (bytes.byteLength > MAX_STORE_BYTES) throw new Error("Credential store is invalid");
-  const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
+  const parsed: unknown = decodeJson(new TextDecoder().decode(bytes));
   if (
     !parsed ||
     typeof parsed !== "object" ||
@@ -94,7 +105,7 @@ export function isPiProviderId(value: string): boolean {
 }
 
 export function encodePiCredentialStore(credentials: CredentialMap): Uint8Array {
-  const encoded = new TextEncoder().encode(JSON.stringify({ version: 1, credentials }));
+  const encoded = new TextEncoder().encode(encodeJson({ version: 1, credentials }));
   if (encoded.byteLength > MAX_STORE_BYTES) throw new Error("Credential store capacity exceeded");
   return encoded;
 }
@@ -106,12 +117,16 @@ export function setPiCredential(input: {
   readonly credential: unknown;
 }) {
   return Effect.gen(function* () {
-    if (!isPiProviderId(input.providerId) || !isPiCredential(input.credential)) {
-      return yield* Effect.fail(new Error("Pi credential is invalid"));
+    const providerId = input.providerId;
+    if (!isPiProviderId(providerId)) {
+      return yield* storeError("Pi credential is invalid");
     }
-    const encodedCredential = new TextEncoder().encode(JSON.stringify(input.credential));
+    const credential = isPiCredential(input.credential)
+      ? input.credential
+      : yield* storeError("Pi credential is invalid");
+    const encodedCredential = new TextEncoder().encode(encodeJson(credential));
     if (encodedCredential.byteLength > MAX_CREDENTIAL_BYTES) {
-      return yield* Effect.fail(new Error("Pi credential is too large"));
+      return yield* storeError("Pi credential is too large");
     }
     const release = yield* Effect.promise(() => acquireInstanceLock(input.instanceId));
     yield* Effect.gen(function* () {
@@ -119,9 +134,9 @@ export function setPiCredential(input: {
       const current = yield* store.get;
       const credentials = yield* Effect.try({
         try: () => parsePiCredentialStore(Option.getOrUndefined(current)),
-        catch: () => new Error("Credential store is invalid"),
+        catch: (cause) => storeError("Credential store is invalid", cause),
       });
-      credentials[input.providerId] = input.credential;
+      credentials[providerId] = credential;
       yield* store.set(encodePiCredentialStore(credentials));
     }).pipe(Effect.ensuring(Effect.sync(release)));
   });
@@ -139,7 +154,7 @@ export function removePiCredential(input: {
       const current = yield* store.get;
       const credentials = yield* Effect.try({
         try: () => parsePiCredentialStore(Option.getOrUndefined(current)),
-        catch: () => new Error("Credential store is invalid"),
+        catch: (cause) => storeError("Credential store is invalid", cause),
       });
       delete credentials[input.providerId];
       if (Object.keys(credentials).length === 0) yield* store.remove;
@@ -186,12 +201,13 @@ export function registerSubpolarCredentialExtension(input: {
   const { host, instanceId, context } = input;
   const providerIds = new Set(input.providerIds.filter(isPiProviderId));
   return Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
     const store = yield* host.credentials("subpolar-pi", instanceId);
     const readMap = Effect.gen(function* () {
       const stored = yield* store.get;
       return yield* Effect.try({
         try: () => parsePiCredentialStore(Option.getOrUndefined(stored)),
-        catch: () => new Error("Credential store is invalid"),
+        catch: (cause) => storeError("Credential store is invalid", cause),
       });
     });
     const persist = (credentials: CredentialMap) =>
@@ -232,9 +248,11 @@ export function registerSubpolarCredentialExtension(input: {
             if (!providerId) return yield* requestFailure("Credential provider ID is required");
             const release = yield* Effect.promise(() => acquireInstanceLock(instanceId));
             const credentials = yield* readMap.pipe(Effect.onError(() => Effect.sync(release)));
-            const transactionId = randomUUID();
+            const transactionId = yield* crypto.randomUUIDv4();
             const records =
               transactionsByInstance.get(instanceId) ?? new Map<string, Transaction>();
+            // This lease must expire even when no Effect runtime is active.
+            // @effect-diagnostics-next-line globalTimersInEffect:off -- Transaction leases outlive request effects and use an unref'd host timer.
             const timer = setTimeout(
               () => finishTransaction(instanceId, transactionId),
               MAX_TRANSACTION_MS,
@@ -267,7 +285,7 @@ export function registerSubpolarCredentialExtension(input: {
               if (request.credential !== undefined) {
                 if (
                   !isPiCredential(request.credential) ||
-                  new TextEncoder().encode(JSON.stringify(request.credential)).byteLength >
+                  new TextEncoder().encode(encodeJson(request.credential)).byteLength >
                     MAX_CREDENTIAL_BYTES
                 ) {
                   return yield* requestFailure("Credential value is invalid");
@@ -308,7 +326,10 @@ export function registerSubpolarCredentialExtension(input: {
         }
       }).pipe(
         Effect.mapError((cause) =>
-          cause instanceof AcpErrors.AcpRequestError
+          cause !== null &&
+          typeof cause === "object" &&
+          "_tag" in cause &&
+          cause._tag === "AcpRequestError"
             ? cause
             : AcpErrors.AcpRequestError.invalidRequest("Credential operation failed"),
         ),

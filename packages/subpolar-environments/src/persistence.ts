@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off -- Persistence uses atomic native filesystem operations outside Effect.
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";

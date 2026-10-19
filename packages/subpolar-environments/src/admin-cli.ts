@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { createHash } from "node:crypto";
+// @effect-diagnostics nodeBuiltinImport:off -- This standalone operator CLI runs at the native Node boundary.
 import path from "node:path";
 import { createEnvironmentManagerHttpClient } from "./manager-client.ts";
 import type { EnvironmentRegistration, EnvironmentRequest } from "./index.ts";

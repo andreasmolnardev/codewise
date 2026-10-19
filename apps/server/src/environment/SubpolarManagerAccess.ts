@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This adapter synchronously normalizes host paths and hashes instance cache identities.
 import { createHash } from "node:crypto";
 import path from "node:path";
 

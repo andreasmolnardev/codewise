@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
-import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { Project, ProjectId, ProviderInstanceId, ThreadId } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -43,7 +43,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       return () => undefined;
     });
   const projectId = ProjectId.make("project:setup-runner-v2");
-  const project = {
+  const project = Project.make({
     id: projectId,
     title: "Project",
     workspaceRoot: "/repo",
@@ -70,7 +70,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
     deletedAt: null,
-  };
+  });
   const layer = ProjectSetupScriptRunner.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -202,7 +202,7 @@ it.effect("routes setup terminals through the allowlisted managed provider insta
     }),
   );
   const projectId = ProjectId.make("project:managed-setup-runner");
-  const project = {
+  const project = Project.make({
     id: projectId,
     title: "Project",
     workspaceRoot: "/repo",
@@ -221,7 +221,7 @@ it.effect("routes setup terminals through the allowlisted managed provider insta
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
     deletedAt: null,
-  };
+  });
   const managedLayer = ProjectSetupScriptRunner.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -289,7 +289,7 @@ it.effect("uses the persisted managed Subpolar session for later setup scripts",
     }),
   );
   const projectId = ProjectId.make("project:managed-settle-runner");
-  const project = {
+  const project = Project.make({
     id: projectId,
     title: "Project",
     workspaceRoot: "/repo",
@@ -302,13 +302,14 @@ it.effect("uses the persisted managed Subpolar session for later setup scripts",
         name: "Clean",
         command: "cargo clean",
         icon: "build" as const,
+        runOnWorktreeCreate: false,
         runOnSettle: true,
       },
     ],
     createdAt: "2026-06-20T00:00:00.000Z",
     updatedAt: "2026-06-20T00:00:00.000Z",
     deletedAt: null,
-  };
+  });
   const providerInstanceId = ProviderInstanceId.make("subpolar_instance");
   const layer = ProjectSetupScriptRunner.layer.pipe(
     Layer.provide(
@@ -320,11 +321,11 @@ it.effect("uses the persisted managed Subpolar session for later setup scripts",
           getByThreadId: () =>
             Effect.succeed(
               Option.some({
-                threadId: "thread-managed-settle",
+                threadId: ThreadId.make("thread-managed-settle"),
                 providerName: "subpolar",
                 providerInstanceId,
                 adapterKey: "subpolar/pi-acp",
-                runtimeMode: "managed",
+                runtimeMode: "full-access",
                 status: "stopped",
                 lastSeenAt: "2026-06-20T00:00:00.000Z",
                 resumeCursor: null,

@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This HTTP bridge binds native Node sockets and streams.
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer, type Server } from "node:http";
 import path from "node:path";
@@ -20,10 +21,18 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function jsonResponse(body: unknown, status = 200, headers?: HeadersInit): Response {
+function jsonResponse(
+  body: unknown,
+  status = 200,
+  headers?: ConstructorParameters<typeof Headers>[0],
+): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...Object.fromEntries(new Headers(headers)) },
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      ...Object.fromEntries(new Headers(headers)),
+    },
   });
 }
 
@@ -34,8 +43,19 @@ function bearerToken(request: Request): string | undefined {
 }
 
 export type EnvironmentManagerInstanceOperation =
-  | "identity" | "ensure" | "start" | "stop" | "restart" | "remove" | "execute"
-  | "pty" | "stdio" | "tcp" | "admin:list" | "admin:inspect" | "admin:rebuild";
+  | "identity"
+  | "ensure"
+  | "start"
+  | "stop"
+  | "restart"
+  | "remove"
+  | "execute"
+  | "pty"
+  | "stdio"
+  | "tcp"
+  | "admin:list"
+  | "admin:inspect"
+  | "admin:rebuild";
 
 /** A bearer credential whose authority is fixed by manager configuration. */
 export interface EnvironmentManagerInstanceCredential {
@@ -50,8 +70,19 @@ type ManagerCredential =
   | ({ readonly kind: "instance" } & EnvironmentManagerInstanceCredential);
 
 const INSTANCE_OPERATIONS = new Set<EnvironmentManagerInstanceOperation>([
-  "identity", "ensure", "start", "stop", "restart", "remove", "execute", "pty", "stdio", "tcp",
-  "admin:list", "admin:inspect", "admin:rebuild",
+  "identity",
+  "ensure",
+  "start",
+  "stop",
+  "restart",
+  "remove",
+  "execute",
+  "pty",
+  "stdio",
+  "tcp",
+  "admin:list",
+  "admin:inspect",
+  "admin:rebuild",
 ]);
 
 /** Parse a server-side token registry. The opaque token is the registry key. */
@@ -67,34 +98,58 @@ export function parseEnvironmentManagerInstanceCredentials(
   if (!isRecord(parsed)) throw new Error("SUBPOLAR_MANAGER_INSTANCE_TOKENS must be a JSON object");
   const credentials: EnvironmentManagerInstanceCredential[] = [];
   for (const [token, value] of Object.entries(parsed)) {
-    if (!isRecord(value) || typeof value.ownerId !== "string" || !value.ownerId.trim() ||
-        typeof value.storageRoot !== "string" || !path.isAbsolute(value.storageRoot) ||
-        !Array.isArray(value.allowedOperations) || value.allowedOperations.length === 0 ||
-        value.allowedOperations.some((operation) => typeof operation !== "string" || !INSTANCE_OPERATIONS.has(operation as EnvironmentManagerInstanceOperation))) {
-      throw new Error("Each manager instance token must define ownerId, an absolute storageRoot, and allowedOperations");
+    if (
+      !isRecord(value) ||
+      typeof value.ownerId !== "string" ||
+      !value.ownerId.trim() ||
+      typeof value.storageRoot !== "string" ||
+      !path.isAbsolute(value.storageRoot) ||
+      !Array.isArray(value.allowedOperations) ||
+      value.allowedOperations.length === 0 ||
+      value.allowedOperations.some(
+        (operation) =>
+          typeof operation !== "string" ||
+          !INSTANCE_OPERATIONS.has(operation as EnvironmentManagerInstanceOperation),
+      )
+    ) {
+      throw new Error(
+        "Each manager instance token must define ownerId, an absolute storageRoot, and allowedOperations",
+      );
     }
-    if (token.length < 32 || token.includes("\0")) throw new Error("Manager instance tokens must contain at least 32 characters");
+    if (token.length < 32 || token.includes("\0"))
+      throw new Error("Manager instance tokens must contain at least 32 characters");
     credentials.push({
       token,
       ownerId: value.ownerId,
       storageRoot: path.resolve(value.storageRoot),
-      allowedOperations: [...new Set(value.allowedOperations as EnvironmentManagerInstanceOperation[])],
+      allowedOperations: [
+        ...new Set(value.allowedOperations as EnvironmentManagerInstanceOperation[]),
+      ],
     });
   }
   return credentials;
 }
 
-function credentialsFor(adminToken: string, instances: readonly EnvironmentManagerInstanceCredential[]): readonly ManagerCredential[] {
-  if (adminToken.length < 32 || adminToken.includes("\0")) throw new Error("Manager API token must contain at least 32 characters");
+function credentialsFor(
+  adminToken: string,
+  instances: readonly EnvironmentManagerInstanceCredential[],
+): readonly ManagerCredential[] {
+  if (adminToken.length < 32 || adminToken.includes("\0"))
+    throw new Error("Manager API token must contain at least 32 characters");
   const tokens = new Set<string>([adminToken]);
   for (const credential of instances) {
-    if (credential.token.length < 32 || credential.token.includes("\0") ||
-        !credential.ownerId.trim() || !path.isAbsolute(credential.storageRoot) ||
-        credential.allowedOperations.length === 0 ||
-        credential.allowedOperations.some((operation) => !INSTANCE_OPERATIONS.has(operation))) {
+    if (
+      credential.token.length < 32 ||
+      credential.token.includes("\0") ||
+      !credential.ownerId.trim() ||
+      !path.isAbsolute(credential.storageRoot) ||
+      credential.allowedOperations.length === 0 ||
+      credential.allowedOperations.some((operation) => !INSTANCE_OPERATIONS.has(operation))
+    ) {
       throw new Error("Manager instance credential is invalid");
     }
-    if (tokens.has(credential.token)) throw new Error("Manager API credentials must use unique tokens");
+    if (tokens.has(credential.token))
+      throw new Error("Manager API credentials must use unique tokens");
     tokens.add(credential.token);
   }
   return [
@@ -103,13 +158,20 @@ function credentialsFor(adminToken: string, instances: readonly EnvironmentManag
   ];
 }
 
-function authenticate(request: Request, credentials: readonly ManagerCredential[]): ManagerCredential | undefined {
+function authenticate(
+  request: Request,
+  credentials: readonly ManagerCredential[],
+): ManagerCredential | undefined {
   const supplied = bearerToken(request);
   if (!supplied) return undefined;
   const suppliedBytes = Buffer.from(supplied);
   for (const credential of credentials) {
     const tokenBytes = Buffer.from(credential.token);
-    if (suppliedBytes.byteLength === tokenBytes.byteLength && timingSafeEqual(suppliedBytes, tokenBytes)) return credential;
+    if (
+      suppliedBytes.byteLength === tokenBytes.byteLength &&
+      timingSafeEqual(suppliedBytes, tokenBytes)
+    )
+      return credential;
   }
   return undefined;
 }
@@ -130,7 +192,10 @@ async function readJson(request: Request): Promise<unknown> {
       size += part.value.byteLength;
       if (size > MAX_BODY_BYTES) {
         await reader.cancel();
-        throw new EnvironmentManagerError("INVALID_REQUEST", "Request body exceeds the allowed size");
+        throw new EnvironmentManagerError(
+          "INVALID_REQUEST",
+          "Request body exceeds the allowed size",
+        );
       }
       chunks.push(part.value);
     }
@@ -146,13 +211,20 @@ async function readJson(request: Request): Promise<unknown> {
     }
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
   } catch (cause) {
-    throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be valid JSON", { cause });
+    throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be valid JSON", {
+      cause,
+    });
   }
 }
 
 function environmentRequest(value: unknown): EnvironmentRequest {
-  if (!isRecord(value) || typeof value.ownerId !== "string" || typeof value.workspaceId !== "string" ||
-      typeof value.storageRoot !== "string" || typeof value.worktreePath !== "string") {
+  if (
+    !isRecord(value) ||
+    typeof value.ownerId !== "string" ||
+    typeof value.workspaceId !== "string" ||
+    typeof value.storageRoot !== "string" ||
+    typeof value.worktreePath !== "string"
+  ) {
     throw new EnvironmentManagerError("INVALID_REQUEST", "Environment identity is invalid");
   }
   return {
@@ -163,16 +235,28 @@ function environmentRequest(value: unknown): EnvironmentRequest {
   };
 }
 
-function scopedEnvironmentRequest(value: unknown, credential: Extract<ManagerCredential, { kind: "instance" }>): EnvironmentRequest {
+function scopedEnvironmentRequest(
+  value: unknown,
+  credential: Extract<ManagerCredential, { kind: "instance" }>,
+): EnvironmentRequest {
   const request = environmentRequest(value);
   const storageRoot = path.resolve(credential.storageRoot);
   const worktreePath = path.resolve(request.worktreePath);
   const relative = path.relative(storageRoot, worktreePath);
   const expectedWorkspaceId = `ws_${createHash("sha256").update(worktreePath).digest("hex").slice(0, 24)}`;
-  if (request.ownerId !== credential.ownerId || path.resolve(request.storageRoot) !== storageRoot ||
-      request.workspaceId !== expectedWorkspaceId || relative === "" || relative === ".." ||
-      relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
-    throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Environment identity does not match the authenticated provider instance");
+  if (
+    request.ownerId !== credential.ownerId ||
+    path.resolve(request.storageRoot) !== storageRoot ||
+    request.workspaceId !== expectedWorkspaceId ||
+    relative === "" ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new EnvironmentManagerError(
+      "OWNERSHIP_MISMATCH",
+      "Environment identity does not match the authenticated provider instance",
+    );
   }
   return {
     ownerId: credential.ownerId,
@@ -184,13 +268,18 @@ function scopedEnvironmentRequest(value: unknown, credential: Extract<ManagerCre
 
 function processRequest(value: unknown): EnvironmentProcessRequest {
   if (value === undefined) return {};
-  if (!isRecord(value)) throw new EnvironmentManagerError("INVALID_REQUEST", "Process options are invalid");
+  if (!isRecord(value))
+    throw new EnvironmentManagerError("INVALID_REQUEST", "Process options are invalid");
   const cwd = value.cwd;
   const environment = value.environment;
   if (cwd !== undefined && typeof cwd !== "string") {
     throw new EnvironmentManagerError("INVALID_REQUEST", "Process working directory is invalid");
   }
-  if (environment !== undefined && (!isRecord(environment) || Object.values(environment).some((entry) => typeof entry !== "string"))) {
+  if (
+    environment !== undefined &&
+    (!isRecord(environment) ||
+      Object.values(environment).some((entry) => typeof entry !== "string"))
+  ) {
     throw new EnvironmentManagerError("INVALID_REQUEST", "Process environment is invalid");
   }
   return {
@@ -199,17 +288,30 @@ function processRequest(value: unknown): EnvironmentProcessRequest {
   };
 }
 
-function interactiveProcessRequest(value: unknown): { cwd?: string; environment?: Record<string, string>; clientSessionId?: string } {
+function interactiveProcessRequest(value: unknown): {
+  cwd?: string;
+  environment?: Record<string, string>;
+  clientSessionId?: string;
+} {
   if (value === undefined) return {};
-  if (!isRecord(value)) throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive process options are invalid");
-  if (value.cwd !== undefined && typeof value.cwd !== "string") throw new EnvironmentManagerError("INVALID_REQUEST", "Process working directory is invalid");
-  if (value.clientSessionId !== undefined && typeof value.clientSessionId !== "string") throw new EnvironmentManagerError("INVALID_REQUEST", "Client session ID is invalid");
-  if (value.environment !== undefined && (!isRecord(value.environment) || Object.values(value.environment).some((entry) => typeof entry !== "string"))) {
+  if (!isRecord(value))
+    throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive process options are invalid");
+  if (value.cwd !== undefined && typeof value.cwd !== "string")
+    throw new EnvironmentManagerError("INVALID_REQUEST", "Process working directory is invalid");
+  if (value.clientSessionId !== undefined && typeof value.clientSessionId !== "string")
+    throw new EnvironmentManagerError("INVALID_REQUEST", "Client session ID is invalid");
+  if (
+    value.environment !== undefined &&
+    (!isRecord(value.environment) ||
+      Object.values(value.environment).some((entry) => typeof entry !== "string"))
+  ) {
     throw new EnvironmentManagerError("INVALID_REQUEST", "Process environment is invalid");
   }
   return {
     ...(value.cwd === undefined ? {} : { cwd: value.cwd }),
-    ...(value.environment === undefined ? {} : { environment: value.environment as Record<string, string> }),
+    ...(value.environment === undefined
+      ? {}
+      : { environment: value.environment as Record<string, string> }),
     ...(value.clientSessionId === undefined ? {} : { clientSessionId: value.clientSessionId }),
   };
 }
@@ -247,29 +349,57 @@ export function createEnvironmentManagerHttpHandler(
       return jsonResponse({ ok: true });
     }
     const credential = authenticate(request, credentials);
-    if (!credential) return jsonResponse({ error: "UNAUTHORIZED" }, 401, { "www-authenticate": "Bearer" });
-    if (request.method !== "POST") return jsonResponse({ error: "METHOD_NOT_ALLOWED" }, 405, { allow: "POST" });
+    if (!credential)
+      return jsonResponse({ error: "UNAUTHORIZED" }, 401, { "www-authenticate": "Bearer" });
+    if (request.method !== "POST")
+      return jsonResponse({ error: "METHOD_NOT_ALLOWED" }, 405, { allow: "POST" });
 
     const pathname = new URL(request.url).pathname;
-    const interactiveRoute = pathname.match(/^\/v1\/environments\/pty\/(start|input|resize|output|terminate)$/)?.[1];
-    const managedSessionRoute = pathname.match(/^\/v1\/environments\/stdio\/(start|input|output|terminate)$/)?.[1];
+    const interactiveRoute = pathname.match(
+      /^\/v1\/environments\/pty\/(start|input|resize|output|terminate)$/,
+    )?.[1];
+    const managedSessionRoute = pathname.match(
+      /^\/v1\/environments\/stdio\/(start|input|output|terminate)$/,
+    )?.[1];
     const tcpTunnelRoute = pathname === "/v1/environments/tcp/start";
-    const adminRoute = pathname.match(/^\/v1\/environments\/admin\/(status|list|inspect|rebuild)$/)?.[1];
-    const route = pathname.match(/^\/v1\/environments\/(identity|ensure|start|stop|restart|remove|execute|reconcile)$/)?.[1];
-    if (!route && !adminRoute && !interactiveRoute && !managedSessionRoute && !tcpTunnelRoute) return jsonResponse({ error: "NOT_FOUND" }, 404);
+    const adminRoute = pathname.match(
+      /^\/v1\/environments\/admin\/(status|list|inspect|rebuild)$/,
+    )?.[1];
+    const route = pathname.match(
+      /^\/v1\/environments\/(identity|ensure|start|stop|restart|remove|execute|reconcile)$/,
+    )?.[1];
+    if (!route && !adminRoute && !interactiveRoute && !managedSessionRoute && !tcpTunnelRoute)
+      return jsonResponse({ error: "NOT_FOUND" }, 404);
 
     const instanceOperation: EnvironmentManagerInstanceOperation | undefined =
-      adminRoute === "list" ? "admin:list" :
-      adminRoute === "inspect" ? "admin:inspect" :
-      adminRoute === "rebuild" ? "admin:rebuild" :
-      route === "reconcile" ? undefined :
-      route as EnvironmentManagerInstanceOperation | undefined ??
-      (interactiveRoute ? "pty" : managedSessionRoute ? "stdio" : tcpTunnelRoute ? "tcp" : undefined);
+      adminRoute === "list"
+        ? "admin:list"
+        : adminRoute === "inspect"
+          ? "admin:inspect"
+          : adminRoute === "rebuild"
+            ? "admin:rebuild"
+            : route === "reconcile"
+              ? undefined
+              : ((route as EnvironmentManagerInstanceOperation | undefined) ??
+                (interactiveRoute
+                  ? "pty"
+                  : managedSessionRoute
+                    ? "stdio"
+                    : tcpTunnelRoute
+                      ? "tcp"
+                      : undefined));
     if (credential.kind === "admin") {
-      const adminLifecycleRoute = route !== undefined && ["identity", "ensure", "start", "stop", "restart", "remove"].includes(route);
-      if (!adminRoute && route !== "reconcile" && !adminLifecycleRoute) return jsonResponse({ error: "FORBIDDEN" }, 403);
-    } else if (route === "reconcile" || adminRoute === "status" || !instanceOperation ||
-      !credential.allowedOperations.includes(instanceOperation)) {
+      const adminLifecycleRoute =
+        route !== undefined &&
+        ["identity", "ensure", "start", "stop", "restart", "remove"].includes(route);
+      if (!adminRoute && route !== "reconcile" && !adminLifecycleRoute)
+        return jsonResponse({ error: "FORBIDDEN" }, 403);
+    } else if (
+      route === "reconcile" ||
+      adminRoute === "status" ||
+      !instanceOperation ||
+      !credential.allowedOperations.includes(instanceOperation)
+    ) {
       return jsonResponse({ error: "FORBIDDEN" }, 403);
     }
 
@@ -282,54 +412,114 @@ export function createEnvironmentManagerHttpHandler(
       if (adminRoute === "list") {
         if (!manager.list) return jsonResponse({ error: "ADMIN_UNAVAILABLE" }, 501);
         const body = await readJson(request);
-        if (!isRecord(body) || (body.ownerId !== undefined && (typeof body.ownerId !== "string" || !body.ownerId.trim()))) {
-          throw new EnvironmentManagerError("INVALID_REQUEST", "ownerId must be a non-empty string when provided");
+        if (
+          !isRecord(body) ||
+          (body.ownerId !== undefined && (typeof body.ownerId !== "string" || !body.ownerId.trim()))
+        ) {
+          throw new EnvironmentManagerError(
+            "INVALID_REQUEST",
+            "ownerId must be a non-empty string when provided",
+          );
         }
-        if (credential.kind === "instance" && body.ownerId !== undefined && body.ownerId !== credential.ownerId) {
-          throw new EnvironmentManagerError("OWNERSHIP_MISMATCH", "Owner does not match the authenticated provider instance");
+        if (
+          credential.kind === "instance" &&
+          body.ownerId !== undefined &&
+          body.ownerId !== credential.ownerId
+        ) {
+          throw new EnvironmentManagerError(
+            "OWNERSHIP_MISMATCH",
+            "Owner does not match the authenticated provider instance",
+          );
         }
-        return jsonResponse({ environments: await manager.list(credential.kind === "instance" ? credential.ownerId : body.ownerId as string | undefined) });
+        return jsonResponse({
+          environments: await manager.list(
+            credential.kind === "instance"
+              ? credential.ownerId
+              : (body.ownerId as string | undefined),
+          ),
+        });
       }
       if (adminRoute === "inspect" || adminRoute === "rebuild") {
         const operation = adminRoute === "inspect" ? manager.inspect : manager.rebuild;
         if (!operation) return jsonResponse({ error: "ADMIN_UNAVAILABLE" }, 501);
         const body = await readJson(request);
-        if (!isRecord(body)) throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be a JSON object");
-        const environment = credential.kind === "instance"
-          ? scopedEnvironmentRequest(body.environment, credential)
-          : environmentRequest(body.environment);
+        if (!isRecord(body))
+          throw new EnvironmentManagerError(
+            "INVALID_REQUEST",
+            "Request body must be a JSON object",
+          );
+        const environment =
+          credential.kind === "instance"
+            ? scopedEnvironmentRequest(body.environment, credential)
+            : environmentRequest(body.environment);
         const result = await operation.call(manager, environment);
-        return adminRoute === "inspect" ? jsonResponse({ environment: result }) : jsonResponse(result);
+        return adminRoute === "inspect"
+          ? jsonResponse({ environment: result })
+          : jsonResponse(result);
       }
       if (route === "reconcile") return jsonResponse({ results: await manager.reconcile() });
       const body = await readJson(request);
-      if (!isRecord(body)) throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be a JSON object");
-      const environment = credential.kind === "instance"
-        ? scopedEnvironmentRequest(body.environment, credential)
-        : environmentRequest(body.environment);
+      if (!isRecord(body))
+        throw new EnvironmentManagerError("INVALID_REQUEST", "Request body must be a JSON object");
+      const environment =
+        credential.kind === "instance"
+          ? scopedEnvironmentRequest(body.environment, credential)
+          : environmentRequest(body.environment);
       if (tcpTunnelRoute) {
-        if (typeof body.port !== "number" || !Number.isSafeInteger(body.port) || body.port < 1 || body.port > 65_535) {
-          throw new EnvironmentManagerError("INVALID_REQUEST", "Port tunnel target must be a valid TCP port");
+        if (
+          typeof body.port !== "number" ||
+          !Number.isSafeInteger(body.port) ||
+          body.port < 1 ||
+          body.port > 65_535
+        ) {
+          throw new EnvironmentManagerError(
+            "INVALID_REQUEST",
+            "Port tunnel target must be a valid TCP port",
+          );
         }
         return jsonResponse(await manager.startPortTunnel(environment, body.port));
       }
       if (managedSessionRoute) {
         if (managedSessionRoute === "start") {
-          if (!Array.isArray(body.command) || body.command.length === 0 || body.command.length > 256 ||
-              body.command.some((part) => typeof part !== "string" || !part || part.includes("\0"))) {
-            throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session command must be a valid argv array");
+          if (
+            !Array.isArray(body.command) ||
+            body.command.length === 0 ||
+            body.command.length > 256 ||
+            body.command.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+          ) {
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Managed session command must be a valid argv array",
+            );
           }
-          return jsonResponse(await manager.startManagedSession(environment, body.command as string[], managedSessionRequest(body.process)));
+          return jsonResponse(
+            await manager.startManagedSession(
+              environment,
+              body.command as string[],
+              managedSessionRequest(body.process),
+            ),
+          );
         }
         if (typeof body.sessionId !== "string" || !body.sessionId || body.sessionId.length > 256) {
           throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session ID is invalid");
         }
         if (managedSessionRoute === "input") {
-          if (typeof body.data !== "string" || body.data.length > 87_384 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.data)) {
-            throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session input must be base64 encoded");
+          if (
+            typeof body.data !== "string" ||
+            body.data.length > 87_384 ||
+            !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.data)
+          ) {
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Managed session input must be base64 encoded",
+            );
           }
           const data = Buffer.from(body.data, "base64");
-          if (data.byteLength > 65_536) throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session input exceeds 64 KiB");
+          if (data.byteLength > 65_536)
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Managed session input exceeds 64 KiB",
+            );
           await manager.writeManagedSession(environment, body.sessionId, data);
           return jsonResponse({ written: data.byteLength });
         }
@@ -338,21 +528,33 @@ export function createEnvironmentManagerHttpHandler(
           return jsonResponse({ terminated: true });
         }
         const afterSequence = body.afterSequence ?? 0;
-        if (typeof afterSequence !== "number" || !Number.isSafeInteger(afterSequence) || afterSequence < 0) {
-          throw new EnvironmentManagerError("INVALID_REQUEST", "Managed session output cursor is invalid");
+        if (
+          typeof afterSequence !== "number" ||
+          !Number.isSafeInteger(afterSequence) ||
+          afterSequence < 0
+        ) {
+          throw new EnvironmentManagerError(
+            "INVALID_REQUEST",
+            "Managed session output cursor is invalid",
+          );
         }
         const controller = new AbortController();
         const abortFromRequest = () => controller.abort(request.signal.reason);
         if (request.signal.aborted) abortFromRequest();
         else request.signal.addEventListener("abort", abortFromRequest, { once: true });
-        const iterator = manager.attachManagedSessionOutput(environment, body.sessionId, afterSequence)[Symbol.asyncIterator]();
+        const iterator = manager
+          .attachManagedSessionOutput(environment, body.sessionId, afterSequence)
+          [Symbol.asyncIterator]();
         let closed = false;
         let consumerReady = false;
         let wakeProducer: (() => void) | undefined;
         const stream = new ReadableStream<Uint8Array>({
           start(controllerStream) {
             const emit = async (event: unknown) => {
-              while (!closed && !consumerReady) await new Promise<void>((resolve) => { wakeProducer = resolve; });
+              while (!closed && !consumerReady)
+                await new Promise<void>((resolve) => {
+                  wakeProducer = resolve;
+                });
               if (closed) return;
               consumerReady = false;
               controllerStream.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
@@ -362,17 +564,30 @@ export function createEnvironmentManagerHttpHandler(
                 while (!closed && !controller.signal.aborted) {
                   const next = await iterator.next();
                   if (next.done) break;
-                  const event = next.value.type === "output"
-                    ? { type: "output", sequence: next.value.sequence, stream: next.value.stream, data: Buffer.from(next.value.data).toString("base64") }
-                    : next.value;
+                  const event =
+                    next.value.type === "output"
+                      ? {
+                          type: "output",
+                          sequence: next.value.sequence,
+                          stream: next.value.stream,
+                          data: Buffer.from(next.value.data).toString("base64"),
+                        }
+                      : next.value;
                   await emit(event);
                   if (next.value.type === "exit") break;
                 }
-                if (!closed) { closed = true; controllerStream.close(); }
+                if (!closed) {
+                  closed = true;
+                  controllerStream.close();
+                }
               } catch (error) {
                 if (!closed) {
                   closed = true;
-                  controllerStream.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "error", code: errorCode(error) })}\n`));
+                  controllerStream.enqueue(
+                    new TextEncoder().encode(
+                      `${JSON.stringify({ type: "error", code: errorCode(error) })}\n`,
+                    ),
+                  );
                   controllerStream.close();
                 }
               } finally {
@@ -381,7 +596,10 @@ export function createEnvironmentManagerHttpHandler(
               }
             })();
           },
-          pull() { consumerReady = true; wakeProducer?.(); },
+          pull() {
+            consumerReady = true;
+            wakeProducer?.();
+          },
           async cancel() {
             closed = true;
             controller.abort();
@@ -390,30 +608,61 @@ export function createEnvironmentManagerHttpHandler(
             request.signal.removeEventListener("abort", abortFromRequest);
           },
         });
-        return new Response(stream, { headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+        return new Response(stream, {
+          headers: {
+            "content-type": "application/x-ndjson; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          },
+        });
       }
       if (interactiveRoute) {
         if (interactiveRoute === "start") {
-          if (!Array.isArray(body.command) || body.command.length === 0 || body.command.length > 256 ||
-              body.command.some((part) => typeof part !== "string" || !part || part.includes("\0"))) {
-            throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive command must be a valid argv array");
+          if (
+            !Array.isArray(body.command) ||
+            body.command.length === 0 ||
+            body.command.length > 256 ||
+            body.command.some((part) => typeof part !== "string" || !part || part.includes("\0"))
+          ) {
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Interactive command must be a valid argv array",
+            );
           }
-          return jsonResponse(await manager.startInteractive(environment, body.command as string[], interactiveProcessRequest(body.process)));
+          return jsonResponse(
+            await manager.startInteractive(
+              environment,
+              body.command as string[],
+              interactiveProcessRequest(body.process),
+            ),
+          );
         }
         if (typeof body.sessionId !== "string" || !body.sessionId || body.sessionId.length > 256) {
           throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive session ID is invalid");
         }
         if (interactiveRoute === "input") {
-          if (typeof body.data !== "string" || body.data.length > 87_384 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.data)) {
-            throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive input must be base64 encoded");
+          if (
+            typeof body.data !== "string" ||
+            body.data.length > 87_384 ||
+            !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(body.data)
+          ) {
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Interactive input must be base64 encoded",
+            );
           }
           const data = Buffer.from(body.data, "base64");
-          if (data.byteLength > 65_536) throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive input exceeds 64 KiB");
+          if (data.byteLength > 65_536)
+            throw new EnvironmentManagerError(
+              "INVALID_REQUEST",
+              "Interactive input exceeds 64 KiB",
+            );
           await manager.writeInteractive(environment, body.sessionId, data);
           return jsonResponse({ written: data.byteLength });
         }
         if (interactiveRoute === "resize") {
-          if (typeof body.columns !== "number" || typeof body.rows !== "number") throw new EnvironmentManagerError("INVALID_REQUEST", "Terminal dimensions are invalid");
+          if (typeof body.columns !== "number" || typeof body.rows !== "number")
+            throw new EnvironmentManagerError("INVALID_REQUEST", "Terminal dimensions are invalid");
           await manager.resizeInteractive(environment, body.sessionId, body.columns, body.rows);
           return jsonResponse({ resized: true });
         }
@@ -422,41 +671,69 @@ export function createEnvironmentManagerHttpHandler(
           return jsonResponse({ terminated: true });
         }
         const afterSequence = body.afterSequence ?? 0;
-        if (typeof afterSequence !== "number" || !Number.isSafeInteger(afterSequence) || afterSequence < 0) {
-          throw new EnvironmentManagerError("INVALID_REQUEST", "Interactive output cursor is invalid");
+        if (
+          typeof afterSequence !== "number" ||
+          !Number.isSafeInteger(afterSequence) ||
+          afterSequence < 0
+        ) {
+          throw new EnvironmentManagerError(
+            "INVALID_REQUEST",
+            "Interactive output cursor is invalid",
+          );
         }
         const controller = new AbortController();
         const abortFromRequest = () => controller.abort(request.signal.reason);
         if (request.signal.aborted) abortFromRequest();
         else request.signal.addEventListener("abort", abortFromRequest, { once: true });
-        const iterator = manager.attachInteractiveOutput(environment, body.sessionId, afterSequence)[Symbol.asyncIterator]();
+        const iterator = manager
+          .attachInteractiveOutput(environment, body.sessionId, afterSequence)
+          [Symbol.asyncIterator]();
         let closed = false;
         let consumerReady = false;
         let wakeProducer: (() => void) | undefined;
         const stream = new ReadableStream<Uint8Array>({
           start(controllerStream) {
             const emit = async (event: unknown) => {
-              while (!closed && !consumerReady) await new Promise<void>((resolve) => { wakeProducer = resolve; });
+              while (!closed && !consumerReady)
+                await new Promise<void>((resolve) => {
+                  wakeProducer = resolve;
+                });
               if (closed) return;
               consumerReady = false;
-              controllerStream.enqueue(new TextEncoder().encode(`${JSON.stringify(event, (_key, value) => value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value)}\n`));
+              controllerStream.enqueue(
+                new TextEncoder().encode(
+                  `${JSON.stringify(event, (_key, value) => (value instanceof Uint8Array ? Buffer.from(value).toString("base64") : value))}\n`,
+                ),
+              );
             };
             void (async () => {
               try {
                 while (!closed && !controller.signal.aborted) {
                   const next = await iterator.next();
                   if (next.done) break;
-                  const event = next.value.type === "output"
-                    ? { type: "output", sequence: next.value.sequence, data: Buffer.from(next.value.data).toString("base64") }
-                    : next.value;
+                  const event =
+                    next.value.type === "output"
+                      ? {
+                          type: "output",
+                          sequence: next.value.sequence,
+                          data: Buffer.from(next.value.data).toString("base64"),
+                        }
+                      : next.value;
                   await emit(event);
                   if (next.value.type === "exit") break;
                 }
-                if (!closed) { closed = true; controllerStream.close(); }
+                if (!closed) {
+                  closed = true;
+                  controllerStream.close();
+                }
               } catch (error) {
                 if (!closed) {
                   closed = true;
-                  controllerStream.enqueue(new TextEncoder().encode(`${JSON.stringify({ type: "error", code: errorCode(error) })}\n`));
+                  controllerStream.enqueue(
+                    new TextEncoder().encode(
+                      `${JSON.stringify({ type: "error", code: errorCode(error) })}\n`,
+                    ),
+                  );
                   controllerStream.close();
                 }
               } finally {
@@ -465,7 +742,10 @@ export function createEnvironmentManagerHttpHandler(
               }
             })();
           },
-          pull() { consumerReady = true; wakeProducer?.(); },
+          pull() {
+            consumerReady = true;
+            wakeProducer?.();
+          },
           async cancel() {
             closed = true;
             controller.abort();
@@ -474,7 +754,13 @@ export function createEnvironmentManagerHttpHandler(
             request.signal.removeEventListener("abort", abortFromRequest);
           },
         });
-        return new Response(stream, { headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" } });
+        return new Response(stream, {
+          headers: {
+            "content-type": "application/x-ndjson; charset=utf-8",
+            "cache-control": "no-store",
+            "x-content-type-options": "nosniff",
+          },
+        });
       }
       if (route === "identity") return jsonResponse(await manager.identity(environment));
       if (route === "ensure") return jsonResponse(await manager.ensure(environment));
@@ -489,9 +775,18 @@ export function createEnvironmentManagerHttpHandler(
         return jsonResponse({ removed: true });
       }
 
-      if (!Array.isArray(body.command) || body.command.length === 0 || body.command.length > 256 ||
-          body.command.some((part) => typeof part !== "string" || part.length === 0 || part.includes("\0"))) {
-        throw new EnvironmentManagerError("INVALID_REQUEST", "Process command must be a valid argv array");
+      if (
+        !Array.isArray(body.command) ||
+        body.command.length === 0 ||
+        body.command.length > 256 ||
+        body.command.some(
+          (part) => typeof part !== "string" || part.length === 0 || part.includes("\0"),
+        )
+      ) {
+        throw new EnvironmentManagerError(
+          "INVALID_REQUEST",
+          "Process command must be a valid argv array",
+        );
       }
       const options = processRequest(body.process);
       const controller = new AbortController();
@@ -508,31 +803,37 @@ export function createEnvironmentManagerHttpHandler(
           streamController = controllerStream;
           const emit = async (event: unknown) => {
             while (!closed && !consumerReady) {
-              await new Promise<void>((resolve) => { wakeProducer = resolve; });
+              await new Promise<void>((resolve) => {
+                wakeProducer = resolve;
+              });
             }
             if (closed) return;
             consumerReady = false;
             streamController!.enqueue(new TextEncoder().encode(`${JSON.stringify(event)}\n`));
           };
-          void manager.execute(environment, body.command as string[], {
-            ...options,
-            signal: controller.signal,
-            onOutput: async (output) => emit({
-              type: "output",
-              stream: output.stream,
-              data: Buffer.from(output.data).toString("base64"),
-            }),
-          }).then(
-            (result) => emit({ type: "result", result }),
-            (error: unknown) => emit({ type: "error", code: errorCode(error) }),
-          ).finally(() => {
-            if (!closed) {
-              closed = true;
-              controllerStream.close();
-            }
-            wakeProducer?.();
-            request.signal.removeEventListener("abort", abortFromRequest);
-          });
+          void manager
+            .execute(environment, body.command as string[], {
+              ...options,
+              signal: controller.signal,
+              onOutput: async (output) =>
+                emit({
+                  type: "output",
+                  stream: output.stream,
+                  data: Buffer.from(output.data).toString("base64"),
+                }),
+            })
+            .then(
+              (result) => emit({ type: "result", result }),
+              (error: unknown) => emit({ type: "error", code: errorCode(error) }),
+            )
+            .finally(() => {
+              if (!closed) {
+                closed = true;
+                controllerStream.close();
+              }
+              wakeProducer?.();
+              request.signal.removeEventListener("abort", abortFromRequest);
+            });
         },
         pull() {
           consumerReady = true;
@@ -546,7 +847,11 @@ export function createEnvironmentManagerHttpHandler(
         },
       });
       return new Response(stream, {
-        headers: { "content-type": "application/x-ndjson; charset=utf-8", "cache-control": "no-store", "x-content-type-options": "nosniff" },
+        headers: {
+          "content-type": "application/x-ndjson; charset=utf-8",
+          "cache-control": "no-store",
+          "x-content-type-options": "nosniff",
+        },
       });
     } catch (error) {
       return jsonResponse({ error: errorCode(error) }, statusFor(error));
@@ -562,7 +867,11 @@ export function createEnvironmentManagerServer(input: {
   readonly hostname?: string;
   readonly port?: number;
 }): Server {
-  const handle = createEnvironmentManagerHttpHandler(input.manager, input.token, input.instanceCredentials);
+  const handle = createEnvironmentManagerHttpHandler(
+    input.manager,
+    input.token,
+    input.instanceCredentials,
+  );
   const hostname = input.hostname ?? "127.0.0.1";
   const server = createServer((incoming, outgoing) => {
     void (async () => {
@@ -571,11 +880,14 @@ export function createEnvironmentManagerServer(input: {
         if (Array.isArray(value)) for (const item of value) headers.append(name, item);
         else if (value !== undefined) headers.set(name, value);
       }
-      const body = incoming.method === "GET" || incoming.method === "HEAD"
-        ? undefined
-        : Readable.toWeb(incoming) as ReadableStream<Uint8Array>;
+      const body =
+        incoming.method === "GET" || incoming.method === "HEAD"
+          ? undefined
+          : (Readable.toWeb(incoming) as ReadableStream<Uint8Array>);
       const requestController = new AbortController();
-      incoming.once("aborted", () => requestController.abort(new Error("Manager request was disconnected")));
+      incoming.once("aborted", () =>
+        requestController.abort(new Error("Manager request was disconnected")),
+      );
       const requestHost = incoming.headers.host ?? `${hostname}:${input.port ?? 0}`;
       const request = new Request(`http://${requestHost}${incoming.url ?? "/"}`, {
         method: incoming.method,
@@ -589,7 +901,10 @@ export function createEnvironmentManagerServer(input: {
         outgoing.end();
         return;
       }
-      await pipeline(Readable.fromWeb(response.body), outgoing);
+      await pipeline(
+        Readable.fromWeb(response.body as unknown as import("node:stream/web").ReadableStream),
+        outgoing,
+      );
     })().catch(() => {
       if (!outgoing.headersSent) outgoing.writeHead(500, { "content-type": "application/json" });
       if (!outgoing.destroyed) outgoing.end(JSON.stringify({ error: "MANAGER_REQUEST_FAILED" }));

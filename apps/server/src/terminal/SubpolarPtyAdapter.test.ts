@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- This plain Node test hashes unique fixture IDs.
 import { createHash } from "node:crypto";
 
 import { createEnvironmentManagerHttpClient } from "@subpolar/environments/manager-client";

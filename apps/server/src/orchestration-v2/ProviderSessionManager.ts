@@ -1,3 +1,4 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- Pi's stable session ID is a synchronous boundary value.
 import { createHash } from "node:crypto";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
@@ -1056,29 +1057,33 @@ export const layerWithOptions = (
                   const persistedRuntimeStatus =
                     entry.runtime.runtimeHarness === "subpolar" &&
                     Option.isSome(providerSessionRuntimes)
-                      ? yield* Effect.exit(Effect.gen(function* () {
-                          const threadIds = new Set(entry.attachedThreadIds);
-                          if (input.detachedThreadId !== undefined) {
-                            threadIds.add(input.detachedThreadId);
-                          }
-                          const status = input.reason === "runtime_error" ||
-                            Option.isNone(closeExit) ||
-                            (Option.isSome(closeExit) && Exit.isFailure(closeExit.value))
-                            ? "error"
-                            : "stopped";
-                          const lastSeenAt = DateTime.formatIso(yield* DateTime.now);
-                          yield* Effect.forEach(
-                            threadIds,
-                            (threadId) => providerSessionRuntimes.value.updateStatusIfSubpolarSession({
-                              threadId,
-                              providerInstanceId: entry.runtime.instanceId,
-                              providerSessionId: entry.runtime.providerSessionId,
-                              status,
-                              lastSeenAt,
-                            }),
-                            { concurrency: "unbounded", discard: true },
-                          );
-                        }))
+                      ? yield* Effect.exit(
+                          Effect.gen(function* () {
+                            const threadIds = new Set(entry.attachedThreadIds);
+                            if (input.detachedThreadId !== undefined) {
+                              threadIds.add(input.detachedThreadId);
+                            }
+                            const status =
+                              input.reason === "runtime_error" ||
+                              Option.isNone(closeExit) ||
+                              (Option.isSome(closeExit) && Exit.isFailure(closeExit.value))
+                                ? "error"
+                                : "stopped";
+                            const lastSeenAt = DateTime.formatIso(yield* DateTime.now);
+                            yield* Effect.forEach(
+                              threadIds,
+                              (threadId) =>
+                                providerSessionRuntimes.value.updateStatusIfSubpolarSession({
+                                  threadId,
+                                  providerInstanceId: entry.runtime.instanceId,
+                                  providerSessionId: entry.runtime.providerSessionId,
+                                  status,
+                                  lastSeenAt,
+                                }),
+                              { concurrency: "unbounded", discard: true },
+                            );
+                          }),
+                        )
                       : undefined;
                   const records = {
                     entry,
@@ -1097,7 +1102,10 @@ export const layerWithOptions = (
                   // The live session is already gone. Preserve the release
                   // events even if this secondary runtime index could not be
                   // updated, then surface that persistence failure to callers.
-                  if (persistedRuntimeStatus !== undefined && Exit.isFailure(persistedRuntimeStatus)) {
+                  if (
+                    persistedRuntimeStatus !== undefined &&
+                    Exit.isFailure(persistedRuntimeStatus)
+                  ) {
                     return yield* Effect.failCause(persistedRuntimeStatus.cause);
                   }
                   if (Option.isSome(closeExit) && Exit.isFailure(closeExit.value)) {
@@ -1780,7 +1788,9 @@ export const layerWithOptions = (
           if (
             runtime.runtimeHarness !== "subpolar" ||
             Option.isNone(providerSessionRuntimes) ||
-            providerThread.nativeThreadRef?.driver !== runtime.driver
+            providerThread.nativeThreadRef === null ||
+            providerThread.nativeThreadRef.driver !== runtime.driver ||
+            providerThread.nativeThreadRef.nativeId === null
           ) {
             return Effect.void;
           }
@@ -1789,22 +1799,27 @@ export const layerWithOptions = (
             const lastSeenAt = DateTime.formatIso(yield* DateTime.now);
             // Pi derives its stable on-disk ID from the ACP session ID; store both
             // identities in the durable provider-session record for lookup.
-            yield* providerSessionRuntimes.value.upsert(buildSubpolarPiSessionRuntime({
-              threadId,
-              providerInstanceId: runtime.instanceId,
-              providerSessionId: runtime.providerSessionId,
-              runtimeMode,
-              acpSessionId,
-              lastSeenAt,
-            })).pipe(
-              Effect.mapError((cause) =>
-                new ProviderAdapter.ProviderAdapterProtocolError({
-                  driver: runtime.driver,
-                  detail: "Failed to persist Subpolar Pi session binding",
-                  payload: cause,
+            yield* providerSessionRuntimes.value
+              .upsert(
+                buildSubpolarPiSessionRuntime({
+                  threadId,
+                  providerInstanceId: runtime.instanceId,
+                  providerSessionId: runtime.providerSessionId,
+                  runtimeMode,
+                  acpSessionId,
+                  lastSeenAt,
                 }),
-              ),
-            );
+              )
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new ProviderAdapter.ProviderAdapterProtocolError({
+                      driver: runtime.driver,
+                      detail: "Failed to persist Subpolar Pi session binding",
+                      payload: cause,
+                    }),
+                ),
+              );
           });
         };
         const subscribeEvents = makeEventSubscription(eventSubscribers);
@@ -1835,7 +1850,11 @@ export const layerWithOptions = (
             ).pipe(
               Effect.andThen(runtime.ensureThread(input)),
               Effect.tap((providerThread) =>
-                persistSubpolarPiSession(input.threadId, providerThread, input.runtimePolicy.runtimeMode),
+                persistSubpolarPiSession(
+                  input.threadId,
+                  providerThread,
+                  input.runtimePolicy.runtimeMode,
+                ),
               ),
               Effect.tap((providerThread) =>
                 markProviderThreadLoaded({

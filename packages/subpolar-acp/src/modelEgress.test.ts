@@ -1,7 +1,16 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "@effect/vitest";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 
-import { createAcpModelFetch, installAcpModelFetch, MANAGED_MODEL_FETCH_METHOD } from "./modelEgress.ts";
+import {
+  createAcpModelFetch,
+  installAcpModelFetch,
+  MANAGED_MODEL_FETCH_METHOD,
+} from "./modelEgress.ts";
+
+class TestAcpRequestError extends Data.TaggedError("TestAcpRequestError")<{
+  readonly message: string;
+}> {}
 
 describe("managed Pi model fetch", () => {
   it("tunnels request and response bytes through the bound ACP session", async () => {
@@ -26,28 +35,53 @@ describe("managed Pi model fetch", () => {
     });
 
     expect(await response.text()).toBe("data: done\n\n");
-    expect(calls).toEqual([{
-      method: MANAGED_MODEL_FETCH_METHOD,
-      payload: expect.objectContaining({ sessionId: "session-a", requestId: expect.any(String), providerId: "openai", method: "POST", url: "https://api.openai.com/v1/responses", body: Buffer.from("{}").toString("base64") }),
-    }]);
+    expect(calls).toEqual([
+      {
+        method: MANAGED_MODEL_FETCH_METHOD,
+        payload: expect.objectContaining({
+          sessionId: "session-a",
+          requestId: expect.any(String),
+          providerId: "openai",
+          method: "POST",
+          url: "https://api.openai.com/v1/responses",
+          body: Buffer.from("{}").toString("base64"),
+        }),
+      },
+    ]);
   });
 
   it("forwards an aborted model request to the host with its request ID", async () => {
     const notifications: unknown[] = [];
     let markStarted!: () => void;
-    const started = new Promise<void>((resolve) => { markStarted = resolve; });
+    const started = new Promise<void>((resolve) => {
+      markStarted = resolve;
+    });
     const client = {
-      extRequest: (_method: string, _payload: unknown) => Effect.tryPromise({
-        try: (signal) => new Promise((_resolve, reject) => {
-          markStarted();
-          signal.addEventListener("abort", () => reject(new Error("ACP request interrupted")), { once: true });
+      extRequest: (_method: string, _payload: unknown) =>
+        Effect.tryPromise({
+          try: (signal) =>
+            new Promise((_resolve, reject) => {
+              markStarted();
+              signal.addEventListener(
+                "abort",
+                () => reject(new TestAcpRequestError({ message: "ACP request interrupted" })),
+                { once: true },
+              );
+            }),
+          catch: (error) =>
+            error instanceof TestAcpRequestError
+              ? error
+              : new TestAcpRequestError({ message: "ACP request interrupted" }),
         }),
-      }),
-      extNotification: (method: string, payload: unknown) => Effect.sync(() => notifications.push({ method, payload })),
+      extNotification: (method: string, payload: unknown) =>
+        Effect.sync(() => notifications.push({ method, payload })),
     };
     const controller = new AbortController();
     const fetch = createAcpModelFetch(client, "session-cancel", "openai");
-    const pending = fetch("https://api.openai.com/v1/responses", { method: "GET", signal: controller.signal });
+    const pending = fetch("https://api.openai.com/v1/responses", {
+      method: "GET",
+      signal: controller.signal,
+    });
     await started;
     controller.abort();
 
@@ -55,7 +89,10 @@ describe("managed Pi model fetch", () => {
     expect(notifications).toHaveLength(1);
     expect(notifications[0]).toEqual({
       method: "subpolar/cancel",
-      payload: expect.objectContaining({ sessionId: "session-cancel", requestId: expect.any(String) }),
+      payload: expect.objectContaining({
+        sessionId: "session-cancel",
+        requestId: expect.any(String),
+      }),
     });
   });
 
@@ -90,12 +127,22 @@ describe("managed Pi model fetch", () => {
 
   it("rejects an oversized streamed body before forwarding it to ACP", async () => {
     let calls = 0;
-    const fetch = createAcpModelFetch({
-      extRequest: () => Effect.sync(() => { calls += 1; return {}; }),
-      extNotification: () => Effect.void,
-    }, "session-c", "openai");
+    const fetch = createAcpModelFetch(
+      {
+        extRequest: () =>
+          Effect.sync(() => {
+            calls += 1;
+            return {};
+          }),
+        extNotification: () => Effect.void,
+      },
+      "session-c",
+      "openai",
+    );
     const body = new Blob([new Uint8Array(8 * 1024 * 1024 + 1)]);
-    await expect(fetch("https://api.openai.com/v1/responses", { method: "POST", body })).rejects.toThrow("size limit");
+    await expect(
+      fetch("https://api.openai.com/v1/responses", { method: "POST", body }),
+    ).rejects.toThrow("size limit");
     expect(calls).toBe(0);
   });
 });

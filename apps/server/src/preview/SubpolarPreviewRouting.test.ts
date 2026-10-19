@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+// @effect-diagnostics globalFetch:off -- This plain Node test drives the local preview HTTP tunnel.
+import { describe, expect, it } from "vite-plus/test";
 import type { EnvironmentManager, EnvironmentRequest } from "@subpolar/environments";
 import { makeSubpolarPreviewRouting } from "./SubpolarPreviewRouting.ts";
 

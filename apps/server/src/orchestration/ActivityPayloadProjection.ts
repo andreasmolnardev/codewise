@@ -1,8 +1,47 @@
-import type {
-  OrchestrationEvent,
-  OrchestrationThreadActivity,
-  OrchestrationThreadDetailSnapshot,
-} from "@t3tools/contracts";
+import type { EventId, TurnId } from "@t3tools/contracts";
+
+/**
+ * Compatibility shape for persisted pre-V2 activity payloads. These records
+ * are still consumed by the web/mobile feed helpers, but their legacy schemas
+ * were retired from the shared contracts package.
+ */
+export interface OrchestrationThreadActivity {
+  readonly id: EventId;
+  readonly tone: string;
+  readonly kind: string;
+  readonly summary: string;
+  readonly payload: {
+    readonly itemType?: unknown;
+    readonly data?: unknown;
+    readonly [key: string]: unknown;
+  };
+  readonly turnId: TurnId;
+  readonly createdAt: string;
+  readonly [key: string]: unknown;
+}
+
+export interface OrchestrationThreadDetailSnapshot {
+  readonly thread: {
+    readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
+    readonly [key: string]: unknown;
+  };
+  readonly [key: string]: unknown;
+}
+
+export type OrchestrationEvent =
+  | {
+      readonly type: "thread.activity-appended";
+      readonly payload: {
+        readonly activity: OrchestrationThreadActivity;
+        readonly [key: string]: unknown;
+      };
+      readonly [key: string]: unknown;
+    }
+  | {
+      readonly type: string;
+      readonly payload?: unknown;
+      readonly [key: string]: unknown;
+    };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -213,15 +252,19 @@ export function projectThreadDetailSnapshot(
   };
 }
 
-export function projectActivityEvent(event: OrchestrationEvent): OrchestrationEvent {
+export function projectActivityEvent<E extends OrchestrationEvent>(event: E): E {
   if (event.type !== "thread.activity-appended") {
     return event;
   }
+  const payload = event.payload as Extract<
+    OrchestrationEvent,
+    { readonly type: "thread.activity-appended" }
+  >["payload"];
   return {
     ...event,
     payload: {
-      ...event.payload,
-      activity: projectActivityPayload(event.payload.activity),
+      ...payload,
+      activity: projectActivityPayload(payload.activity),
     },
-  };
+  } as E;
 }

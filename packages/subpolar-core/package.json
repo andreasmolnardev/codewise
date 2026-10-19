@@ -13,5 +13,8 @@
   },
   "dependencies": {
     "@subpolar/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:"
   }
 }

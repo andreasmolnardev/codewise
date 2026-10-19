@@ -3,6 +3,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+// @effect-diagnostics nodeBuiltinImport:off -- The fake manager records an external test report file at the Node process boundary.
 import { writeFile } from "node:fs/promises";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -54,7 +55,7 @@ const saveReport = async () => {
 
 interface Worker {
   readonly target: EnvironmentRequest;
-  readonly scope: Scope.Scope;
+  readonly scope: Scope.Closeable;
   readonly input: Queue.Queue<Uint8Array, Cause.Done<void>>;
   readonly rawOutput: Queue.Queue<string>;
   readonly output: ReturnType<typeof outputQueue>;

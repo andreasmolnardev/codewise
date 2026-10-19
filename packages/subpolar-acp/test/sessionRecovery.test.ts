@@ -1,4 +1,5 @@
-import { afterEach, expect, test } from "bun:test";
+// @effect-diagnostics nodeBuiltinImport:off - These tests allocate and clean temporary Node filesystem fixtures.
+import { afterEach, expect, it as test } from "@effect/vitest";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
@@ -113,7 +114,7 @@ test("ACP resumes only a persisted Pi session matching the native session ID and
     }),
   );
   expect((await readMessage(output, 2)).error).toBeUndefined();
-  await Scope.close(scope, Exit.void);
+  await Effect.runPromise(Scope.close(scope, Exit.void));
 });
 
 test("ACP rejects a cold resume when the Pi session is missing or bound to another cwd", async () => {
@@ -161,7 +162,7 @@ test("ACP rejects a cold resume when the Pi session is missing or bound to anoth
       }),
     );
     expect((await readMessage(output, 2)).error).toBeDefined();
-    await Scope.close(scope, Exit.void);
+    await Effect.runPromise(Scope.close(scope, Exit.void));
   }
 });
 
@@ -236,5 +237,5 @@ test("ACP close releases transient state and prevents resuming a closed runtime 
     }),
   );
   expect((await readMessage(output, 4)).error).toBeDefined();
-  await Scope.close(scope, Exit.void);
+  await Effect.runPromise(Scope.close(scope, Exit.void));
 });

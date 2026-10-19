@@ -1,34 +1,53 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as AcpErrors from "effect-acp/errors";
 
 import { registerSubpolarModelEgressExtension } from "./subpolarModelEgress.ts";
 
 function makeHarness(
   activeSessionId = "worker-session",
   providerIds = ["openai"],
-  requestProvider?: (signal?: AbortSignal) => Promise<{ status: number; statusText: string; headers: Record<string, string>; body: string }>,
+  requestProvider?: (signal?: AbortSignal) => Promise<{
+    status: number;
+    statusText: string;
+    headers: Record<string, string>;
+    body: string;
+  }>,
 ) {
-  let handler: ((request: unknown) => Effect.Effect<unknown, unknown>) | undefined;
-  let notificationHandler: ((request: unknown) => Effect.Effect<void, unknown>) | undefined;
+  let handler: ((request: unknown) => Effect.Effect<unknown, AcpErrors.AcpError>) | undefined;
+  let notificationHandler:
+    | ((request: unknown) => Effect.Effect<void, AcpErrors.AcpError>)
+    | undefined;
   const context = {
     activeSessionId: Effect.succeed(activeSessionId),
     runtime: {
       handleExtRequest: (_method: string, _schema: unknown, callback: unknown) =>
-        Effect.sync(() => { handler = callback as typeof handler; }),
+        Effect.sync(() => {
+          handler = callback as typeof handler;
+        }),
       handleExtNotification: (_method: string, _schema: unknown, callback: unknown) =>
-        Effect.sync(() => { notificationHandler = callback as typeof notificationHandler; }),
+        Effect.sync(() => {
+          notificationHandler = callback as typeof notificationHandler;
+        }),
     },
   };
-  const ready = Effect.runPromise(registerSubpolarModelEgressExtension({
-    providerIds,
-    context: context as never,
-    resolveAddress: async () => "8.8.8.8",
-    requestProvider: async (_hostname, _address, _method, _path, _headers, _body, signal) => requestProvider
-      ? requestProvider(signal)
-      : new Promise((_resolve, reject) => {
-          signal?.addEventListener("abort", () => reject(new Error("Provider request aborted")), { once: true });
-        }),
-  }));
+  const ready = Effect.runPromise(
+    registerSubpolarModelEgressExtension({
+      providerIds,
+      context: context as never,
+      resolveAddress: async () => "8.8.8.8",
+      requestProvider: async (_hostname, _address, _method, _path, _headers, _body, signal) =>
+        requestProvider
+          ? requestProvider(signal)
+          : new Promise((_resolve, reject) => {
+              signal?.addEventListener(
+                "abort",
+                () => reject(new Error("Provider request aborted")),
+                { once: true },
+              );
+            }),
+    }),
+  );
   return {
     ready,
     invoke: async (request: Record<string, unknown>) => {
@@ -54,37 +73,56 @@ const request = {
   body: Buffer.from("{}").toString("base64"),
 };
 
+async function assertRejected(promise: Promise<unknown>): Promise<void> {
+  assert.isTrue(
+    await promise.then(
+      () => false,
+      () => true,
+    ),
+  );
+}
+
 it("rejects model egress from a different ACP session", async () => {
   const harness = makeHarness("other-session");
-  await assert.rejects(harness.invoke(request));
+  await assertRejected(harness.invoke(request));
 });
 
 it("rejects providers outside the provider-instance credential allowlist", async () => {
   const harness = makeHarness("worker-session", []);
-  await assert.rejects(harness.invoke(request));
+  await assertRejected(harness.invoke(request));
 });
 
 it("aborts the active provider request when the matching ACP cancel notification arrives", async () => {
   let started!: () => void;
-  const began = new Promise<void>((resolve) => { started = resolve; });
+  const began = new Promise<void>((resolve) => {
+    started = resolve;
+  });
   let requestSignal: AbortSignal | undefined;
   const harness = makeHarness("worker-session", ["openai"], async (signal) => {
-      requestSignal = signal;
-      started();
-      return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => reject(new Error("Provider request aborted")), { once: true }));
-    });
+    requestSignal = signal;
+    started();
+    return new Promise((_resolve, reject) =>
+      signal?.addEventListener("abort", () => reject(new Error("Provider request aborted")), {
+        once: true,
+      }),
+    );
+  });
   const pending = harness.invoke(request);
   await began;
   await harness.notify({ sessionId: request.sessionId, requestId: request.requestId });
-  await assert.rejects(pending);
+  await assertRejected(pending);
   assert.equal(requestSignal?.aborted, true);
 });
 
 it("rejects non-provider hosts and custom endpoint redirects before opening a network request", async () => {
   const harness = makeHarness();
-  await assert.rejects(harness.invoke({ ...request, url: "https://127.0.0.1/latest/meta-data" }));
-  await assert.rejects(harness.invoke({ ...request, url: "https://evil.example/v1/chat/completions" }));
-  await assert.rejects(harness.invoke({ ...request, url: "https://api.openai.com:444/v1/chat/completions" }));
-  await assert.rejects(harness.invoke({ ...request, url: "https://api.openai.com/v1/models" }));
-  await assert.rejects(harness.invoke({ ...request, method: "GET" }));
+  await assertRejected(harness.invoke({ ...request, url: "https://127.0.0.1/latest/meta-data" }));
+  await assertRejected(
+    harness.invoke({ ...request, url: "https://evil.example/v1/chat/completions" }),
+  );
+  await assertRejected(
+    harness.invoke({ ...request, url: "https://api.openai.com:444/v1/chat/completions" }),
+  );
+  await assertRejected(harness.invoke({ ...request, url: "https://api.openai.com/v1/models" }));
+  await assertRejected(harness.invoke({ ...request, method: "GET" }));
 });

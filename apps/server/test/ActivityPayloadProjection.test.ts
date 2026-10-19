@@ -1,22 +1,21 @@
-import {
-  EventId,
-  ProjectId,
-  ProviderInstanceId,
-  ThreadId,
-  TurnId,
-  type OrchestrationEvent,
-  type OrchestrationThread,
-  type OrchestrationThreadActivity,
-} from "@t3tools/contracts";
+import { EventId, ProjectId, ProviderInstanceId, ThreadId, TurnId } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { buildThreadFeed, type ThreadFeedActivity } from "../../mobile/src/lib/threadActivity.ts";
-import { deriveWorkLogEntries } from "../../web/src/session-logic.ts";
+import { workEntryRowLabel } from "../../mobile/src/lib/threadActivity.ts";
+import { workEntryDisplayLabel } from "../../web/src/components/chat/MessagesTimeline.logic.ts";
+import type { WorkLogPresentationEntry } from "@t3tools/client-runtime/work-log/presentation";
 import {
+  type OrchestrationEvent,
+  type OrchestrationThreadActivity,
+  type OrchestrationThreadDetailSnapshot,
   projectActivityEvent,
   projectActivityPayload,
   projectThreadDetailSnapshot,
 } from "../src/orchestration/ActivityPayloadProjection.ts";
+
+type OrchestrationThread = OrchestrationThreadDetailSnapshot["thread"] & {
+  readonly id: ThreadId;
+};
 
 function makeActivity(
   id: string,
@@ -66,6 +65,30 @@ function makeThread(activities: ReadonlyArray<OrchestrationThreadActivity>): Orc
     activities,
     checkpoints: [],
     session: null,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function asPresentationEntry(activity: OrchestrationThreadActivity): WorkLogPresentationEntry {
+  const payload = activity.payload;
+  const data = asRecord(payload.data);
+  return {
+    id: String(activity.id),
+    createdAt: activity.createdAt,
+    label: typeof payload.title === "string" ? payload.title : activity.summary,
+    tone: activity.tone as WorkLogPresentationEntry["tone"],
+    itemType:
+      typeof payload.itemType === "string"
+        ? (payload.itemType as WorkLogPresentationEntry["itemType"])
+        : undefined,
+    toolTitle: typeof payload.title === "string" ? payload.title : undefined,
+    detail: typeof payload.detail === "string" ? payload.detail : undefined,
+    toolData: data,
   };
 }
 
@@ -134,27 +157,6 @@ const fixtures = [
 ] satisfies ReadonlyArray<OrchestrationThreadActivity>;
 
 describe("projectActivityPayload", () => {
-  function comparableActivity(activity: ThreadFeedActivity) {
-    return {
-      ...activity,
-      fullDetail: activity.getFullDetail(),
-      copyText: activity.getCopyText(),
-      getFullDetail: undefined,
-      getCopyText: undefined,
-    };
-  }
-
-  function comparableThreadFeed(activities: ReadonlyArray<OrchestrationThreadActivity>) {
-    return buildThreadFeed(makeThread(activities)).map((entry) =>
-      entry.type === "activity-group"
-        ? {
-            ...entry,
-            activities: entry.activities.map(comparableActivity),
-          }
-        : entry,
-    );
-  }
-
   it("drops unread bulk while retaining command, file, tool, and summary inputs", () => {
     const projected = projectActivityPayload(fixtures[0]!);
     expect(projected.payload).toEqual({
@@ -187,18 +189,22 @@ describe("projectActivityPayload", () => {
     expect(projectActivityPayload(fixtures[4]!)).toBe(fixtures[4]);
   });
 
-  it("keeps current web and mobile derived output identical for every tool item type", () => {
+  it("preserves current web and mobile work-log labels after pruning", () => {
     for (const activity of fixtures) {
       const projected = projectActivityPayload(activity);
-      expect(deriveWorkLogEntries([projected])).toEqual(deriveWorkLogEntries([activity]));
-      expect(comparableThreadFeed([projected])).toEqual(comparableThreadFeed([activity]));
+      const originalEntry = asPresentationEntry(activity);
+      const projectedEntry = asPresentationEntry(projected);
+      expect(workEntryDisplayLabel(projectedEntry, undefined)).toBe(
+        workEntryDisplayLabel(originalEntry, undefined),
+      );
+      expect(workEntryRowLabel(projectedEntry)).toBe(workEntryRowLabel(originalEntry));
     }
   });
 
   it("projects snapshot and event transports without mutating their sources", () => {
     const activity = fixtures[0]!;
     const thread = makeThread([activity]);
-    const snapshot = { snapshotSequence: 7, thread };
+    const snapshot: OrchestrationThreadDetailSnapshot = { snapshotSequence: 7, thread };
     const projectedSnapshot = projectThreadDetailSnapshot(snapshot);
 
     expect(projectedSnapshot.thread.activities[0]).not.toBe(activity);

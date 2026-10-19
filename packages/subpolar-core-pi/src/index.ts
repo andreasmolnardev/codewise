@@ -105,7 +105,7 @@ export class PiProviderError extends Error {
   constructor(message = "Pi provider execution failed", details?: JsonValue) {
     super(message);
     this.name = "PiProviderError";
-    this.details = details;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -116,7 +116,7 @@ export class PiRuntimeError extends Error {
   constructor(message = "Pi runtime execution failed", details?: JsonValue) {
     super(message);
     this.name = "PiRuntimeError";
-    this.details = details;
+    if (details !== undefined) this.details = details;
   }
 }
 
@@ -269,9 +269,11 @@ export function createPiRunPort<Config>(
           prompt: request.prompt,
           context: mapContext(request),
           transcript: normalizePiTranscriptProjection(request.transcript),
-          toolDefinitions: request.toolDefinitions,
-          signal: request.signal,
-          tools: request.tools,
+          ...(request.toolDefinitions === undefined
+            ? {}
+            : { toolDefinitions: request.toolDefinitions }),
+          ...(request.signal === undefined ? {} : { signal: request.signal }),
+          ...(request.tools === undefined ? {} : { tools: request.tools }),
           emit: async (event) => {
             const normalized = normalizePiStreamEvent(event);
             await emit?.({ type: normalized.type, data: normalized.data });
@@ -307,12 +309,15 @@ export function createPiRunPort<Config>(
 export class InMemoryPiSession implements PiExecutionSession {
   private projection: PiTranscriptProjection = { entries: [] };
   private disposedState = false;
+  private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown>;
 
   constructor(
-    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({
-      prompt,
-    }) => ({ text: prompt }),
-  ) {}
+    handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({ prompt }) => ({
+      text: prompt,
+    }),
+  ) {
+    this.handler = handler;
+  }
 
   get transcript(): PiTranscriptProjection {
     return normalizePiTranscriptProjection(this.projection);
@@ -337,12 +342,15 @@ export class InMemoryPiSession implements PiExecutionSession {
 /** A disposable in-memory executor that owns at most one transient session. */
 export class InMemoryPiExecutor implements PiExecutor {
   private session?: InMemoryPiSession;
+  private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown>;
 
   constructor(
-    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({
-      prompt,
-    }) => ({ text: prompt }),
-  ) {}
+    handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({ prompt }) => ({
+      text: prompt,
+    }),
+  ) {
+    this.handler = handler;
+  }
 
   get activeSession(): InMemoryPiSession | undefined {
     return this.session;
@@ -385,19 +393,21 @@ export function createPiStatelessExecutor<Config>(
   toolDefinitions: readonly ToolDefinition[] = [],
 ): StatelessExecutor {
   const port = createPiRunPort(factory, config);
-  return async (execution) =>
-    port.run(
+  return async (execution) => {
+    const transcriptProjection = await transcript?.(execution);
+    return port.run(
       {
         runId: execution.request.runId,
         prompt: execution.request.prompt,
         context: execution.context,
-        signal: execution.request.signal,
+        ...(execution.request.signal === undefined ? {} : { signal: execution.request.signal }),
         tools: execution.tools,
-        transcript: await transcript?.(execution),
+        ...(transcriptProjection === undefined ? {} : { transcript: transcriptProjection }),
         toolDefinitions,
       },
       execution.emit,
     );
+  };
 }
 
 export async function resolvePiExecutorFactory(

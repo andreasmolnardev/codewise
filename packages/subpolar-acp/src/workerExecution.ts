@@ -1,7 +1,9 @@
+// @effect-diagnostics nodeBuiltinImport:off - This module owns Node subprocess, filesystem, and mounted-worktree operations.
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
+import * as Effect from "effect/Effect";
 import { canonicalizeToolId } from "@subpolar/tools";
 import type { ExecutionContext, ToolCall, ToolDefinition, ToolExecutor } from "@subpolar/shared";
 import type { SubpolarAcpOptions } from "./index.ts";
@@ -293,7 +295,7 @@ async function executeLocal(
     let truncated = false;
     let cancelled = signal?.aborted ?? false;
     let settled = false;
-    let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+    let escalationController: AbortController | undefined;
     const capture = (stream: "stdout" | "stderr", chunk: Buffer) => {
       const remaining = MAX_CAPTURED_OUTPUT_BYTES - captured;
       if (remaining <= 0) {
@@ -310,11 +312,14 @@ async function executeLocal(
     const onAbort = () => {
       cancelled = true;
       signalProcessGroup(child, "SIGTERM");
-      escalationTimer = setTimeout(
-        () => signalProcessGroup(child, "SIGKILL"),
-        TERMINATION_GRACE_MS,
-      );
-      escalationTimer.unref();
+      escalationController = new AbortController();
+      void Effect.runPromise(Effect.sleep(TERMINATION_GRACE_MS), {
+        signal: escalationController.signal,
+      })
+        .then(() => {
+          if (!settled) signalProcessGroup(child, "SIGKILL");
+        })
+        .catch(() => undefined);
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (cancelled) onAbort();
@@ -322,7 +327,7 @@ async function executeLocal(
       if (settled) return;
       settled = true;
       signal?.removeEventListener("abort", onAbort);
-      if (escalationTimer) clearTimeout(escalationTimer);
+      escalationController?.abort();
       resolve({
         ok: false,
         error: {
@@ -335,7 +340,7 @@ async function executeLocal(
       if (settled) return;
       settled = true;
       signal?.removeEventListener("abort", onAbort);
-      if (escalationTimer) clearTimeout(escalationTimer);
+      escalationController?.abort();
       resolve({
         ok: true,
         value: {

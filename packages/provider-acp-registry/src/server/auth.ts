@@ -12,6 +12,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Semaphore from "effect/Semaphore";
+import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import type * as AcpSchema from "effect-acp/compat";
@@ -37,6 +38,22 @@ type Runtime = Pick<
 
 const MAX_AUTH_FORM_PAYLOAD_BYTES = 256 * 1024;
 const SUBPOLAR_PI_CREDENTIAL_METHOD = "t3-subpolar-pi-credential";
+const JsonValue = Schema.fromJsonString(Schema.Unknown);
+const AuthFormField = Schema.Struct({
+  type: Schema.String,
+  title: Schema.optional(Schema.String),
+  description: Schema.optional(Schema.String),
+  format: Schema.optional(Schema.String),
+  enum: Schema.optional(Schema.Array(Schema.Unknown)),
+  oneOf: Schema.optional(Schema.Array(Schema.Unknown)),
+});
+const AuthFormSchema = Schema.Struct({
+  type: Schema.Literal("object"),
+  properties: Schema.Record(Schema.String, AuthFormField),
+  required: Schema.optional(Schema.Array(Schema.String)),
+});
+const jsonByteLength = (value: unknown) =>
+  Buffer.byteLength(Schema.encodeSync(JsonValue)(value), "utf8");
 
 export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (options: {
   readonly instanceId: ProviderInstanceId;
@@ -285,10 +302,9 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
         const submitted = yield* Deferred.await(values);
         const credentialText = submitted?.credentialJson?.trim();
         if (!credentialText) return yield* failure("start", "A Pi credential is required.");
-        const credential = yield* Effect.try({
-          try: () => JSON.parse(credentialText) as unknown,
-          catch: () => failure("start", "The Pi credential must be valid JSON."),
-        });
+        const credential = yield* Schema.decodeEffect(JsonValue)(credentialText).pipe(
+          Effect.mapError(() => failure("start", "The Pi credential must be valid JSON.")),
+        );
         if (!isPiCredential(credential)) {
           return yield* failure(
             "start",
@@ -320,8 +336,12 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
           yield* runtime.handleElicitation((request) =>
             elicitationLock.withPermit(
               Effect.gen(function* () {
-                if (request.mode === "form" && "requestedSchema" in request) {
-                  const properties = request.requestedSchema.properties ?? {};
+                if (
+                  request.mode === "form" &&
+                  "requestedSchema" in request &&
+                  Schema.is(AuthFormSchema)(request.requestedSchema)
+                ) {
+                  const properties = request.requestedSchema.properties;
                   const entries = Object.entries(properties);
                   const requiredNames = request.requestedSchema.required ?? [];
                   const propertyNames = new Set(entries.map(([name]) => name));
@@ -356,12 +376,10 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
                   });
                   const id = `acp-form-${++formInteractionOrdinal}`;
                   const values = yield* Deferred.make<Readonly<Record<string, string>> | null>();
-                  yield* context.setInteraction(
-                    { type: "credentials", id, fields },
-                    (response) =>
-                      response.type === "credentials"
-                        ? Deferred.succeed(values, response.values).pipe(Effect.asVoid)
-                        : Effect.void,
+                  yield* context.setInteraction({ type: "credentials", id, fields }, (response) =>
+                    response.type === "credentials"
+                      ? Deferred.succeed(values, response.values).pipe(Effect.asVoid)
+                      : Effect.void,
                   );
                   const submitted = yield* Deferred.await(values);
                   if (submitted === null) return { action: "decline" } as const;
@@ -372,10 +390,7 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
                       typeof submitted[name] === "string" ? [[name, submitted[name]]] : [],
                     ),
                   );
-                  if (
-                    Buffer.byteLength(JSON.stringify(content), "utf8") >
-                    MAX_AUTH_FORM_PAYLOAD_BYTES
-                  )
+                  if (jsonByteLength(content) > MAX_AUTH_FORM_PAYLOAD_BYTES)
                     return { action: "decline" } as const;
                   return { action: "accept", content } as const;
                 }
@@ -395,9 +410,7 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
                   { type: "browser", id, url, requiresConsent: true },
                   (response) =>
                     response.type === "browser"
-                      ? Deferred.succeed(consent, response.action === "accept").pipe(
-                          Effect.asVoid,
-                        )
+                      ? Deferred.succeed(consent, response.action === "accept").pipe(Effect.asVoid)
                       : Effect.void,
                 );
                 return (yield* Deferred.await(consent))
@@ -479,7 +492,9 @@ export const makeAcpRegistryAuth = Effect.fn("makeAcpRegistryAuth")(function* (o
           instanceId: options.instanceId,
           providerId: configuredPiProviderId,
         }).pipe(
-          Effect.mapError(() => failure("logout", "T3 could not remove the Pi credential securely.")),
+          Effect.mapError(() =>
+            failure("logout", "T3 could not remove the Pi credential securely."),
+          ),
         );
       }
       const resolved = yield* resolve;

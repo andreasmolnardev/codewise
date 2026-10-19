@@ -1,16 +1,20 @@
+// @effect-diagnostics nodeBuiltinImport:off - This ACP composition hashes tool IDs synchronously at its Node runtime boundary.
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Stdio from "effect/Stdio";
-import { createHash, randomUUID } from "node:crypto";
+import * as Schema from "effect/Schema";
+import { createHash } from "node:crypto";
 
 import * as AcpAgent from "effect-acp/agent";
 import * as AcpError from "effect-acp/errors";
 import * as AcpSchema from "effect-acp/schema";
-import { createPolicyGateway, type RuntimeContext } from "@subpolar/runtime";
+import type { SessionUpdate as CompatSessionUpdate } from "effect-acp/compat";
+import { createPolicyGateway } from "@subpolar/runtime";
 import type {
   PolicyResolver,
   PolicyRules,
   ResolvedAgentProfile,
+  RuntimeContext,
   ToolCall,
   ToolDefinition,
   ToolExecutor,
@@ -61,10 +65,18 @@ interface SessionContext {
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : "Subpolar execution failed";
 
+function randomId(): string {
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6]! & 0x0f) | 0x40;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 function contentText(block: AcpSchema.ContentBlock): string | undefined {
-  if (block.type === "text") return block.text;
+  if (block.type === "text") return typeof block.text === "string" ? block.text : undefined;
   if (block.type === "resource_link")
-    return `[Resource: ${block.title ?? block.name}] ${block.uri}`;
+    return `[Resource: ${typeof block.title === "string" ? block.title : block.name}] ${block.uri}`;
   if (block.type === "resource") {
     const resource = block.resource as { text?: unknown };
     return typeof resource.text === "string" ? resource.text : undefined;
@@ -87,6 +99,29 @@ function eventText(value: unknown): string | undefined {
   if (!value || typeof value !== "object") return undefined;
   const text = (value as { text?: unknown }).text;
   return typeof text === "string" ? text : undefined;
+}
+
+function acpJson(value: unknown): NonNullable<AcpSchema.ToolCallUpdate["rawOutput"]> | undefined {
+  if (value === null || typeof value === "string" || typeof value === "boolean")
+    return value as NonNullable<AcpSchema.ToolCallUpdate["rawOutput"]>;
+  if (typeof value === "number")
+    return Number.isFinite(value)
+      ? (value as NonNullable<AcpSchema.ToolCallUpdate["rawOutput"]>)
+      : undefined;
+  if (Array.isArray(value)) {
+    const items = value.map(acpJson);
+    return items.some((item) => item === undefined)
+      ? undefined
+      : (items as NonNullable<AcpSchema.ToolCallUpdate["rawOutput"]>);
+  }
+  if (typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>).map(
+      ([key, item]) => [key, acpJson(item)] as const,
+    );
+    if (entries.some(([, item]) => item === undefined)) return undefined;
+    return Object.fromEntries(entries) as NonNullable<AcpSchema.ToolCallUpdate["rawOutput"]>;
+  }
+  return undefined;
 }
 
 function combinePolicyRules(...rules: Array<PolicyRules | undefined>): PolicyRules {
@@ -121,8 +156,13 @@ function createRuntimeHost(
   const toolDefinitions = options.executeTool ? (options.toolDefinitions ?? []) : [];
   const gateway = createPolicyGateway({
     tools: toolDefinitions,
-    validateInput: (input, definition) =>
-      validateToolInput(input, definition.inputSchema as Parameters<typeof validateToolInput>[1]),
+    validateInput: (input, definition) => {
+      const validation = validateToolInput(
+        input,
+        definition.inputSchema as Parameters<typeof validateToolInput>[1],
+      );
+      return validation.valid ? validation : { valid: false, errors: [...validation.errors] };
+    },
     resolvePolicy: async (definition, context, input) => {
       const policy = combinePolicyRules(
         options.profile?.toolPolicies[definition.id],
@@ -171,7 +211,7 @@ function createRuntimeHost(
         };
       },
     },
-    createId: () => `subpolar-${crypto.randomUUID()}`,
+    createId: () => `subpolar-${randomId()}`,
     eventSink: async (event) => {
       if (event.type === "run.progress" && event.sessionId) {
         await Effect.runPromise(emitProgress(event.sessionId, event.runId, event.data));
@@ -318,7 +358,15 @@ function makeAgent(
             modelRuntimeFactory: async (sdk: PiSdkModule, sessionId: string) => {
               if (!sdk.ModelRuntime) throw new Error("Pi credential runtime is unavailable");
               const runtime = await sdk.ModelRuntime.create({
-                credentials: createAcpCredentialStore(agent.client, sessionId),
+                credentials: createAcpCredentialStore(
+                  {
+                    raw: {
+                      request: (method, payload) =>
+                        Effect.runPromise(agent.client.extRequest(method, payload)),
+                    },
+                  },
+                  sessionId,
+                ),
                 modelsPath: null,
                 refreshOnCreate: false,
                 allowModelNetwork: false,
@@ -350,7 +398,7 @@ function makeAgent(
         };
       }
       try {
-        const requestId = randomUUID();
+        const requestId = randomId();
         const request = Effect.runPromise(
           agent.client.extRequest("subpolar/mcp", {
             sessionId,
@@ -430,7 +478,7 @@ function makeAgent(
                 };
               }
               try {
-                const requestId = randomUUID();
+                const requestId = randomId();
                 const request = Effect.runPromise(
                   agent.client.extRequest("subpolar/t3_mcp", {
                     sessionId: context.sessionId,
@@ -501,33 +549,38 @@ function makeAgent(
           const isUpdate = data.type === "tool_execution_update";
           if (!isStart && !isEnd && !isUpdate) return Effect.void;
           const toolName = toolNameBySdkName.get(data.toolName) ?? "Subpolar tool";
+          const update: CompatSessionUpdate = isStart
+            ? {
+                sessionUpdate: "tool_call",
+                toolCallId: data.toolCallId,
+                title: toolName,
+                name: toolName,
+                kind: "other",
+                status: "pending",
+                rawInput: data.args as NonNullable<AcpSchema.ToolCallUpdate["rawInput"]>,
+              }
+            : isUpdate
+              ? {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: data.toolCallId,
+                  status: "in_progress",
+                  ...(acpJson(data.partialResult) === undefined
+                    ? {}
+                    : { rawOutput: acpJson(data.partialResult) }),
+                }
+              : {
+                  sessionUpdate: "tool_call_update",
+                  toolCallId: data.toolCallId,
+                  status: data.isError === true ? "failed" : "completed",
+                  ...(acpJson(data.result) === undefined
+                    ? {}
+                    : { rawOutput: acpJson(data.result) }),
+                };
           return agent.client
             .sessionUpdate({
               sessionId,
-              update: isStart
-                ? {
-                    sessionUpdate: "tool_call",
-                    toolCallId: data.toolCallId,
-                    title: toolName,
-                    name: toolName,
-                    kind: "other",
-                    status: "pending",
-                    rawInput: data.args as NonNullable<AcpSchema.ToolCallUpdate["rawInput"]>,
-                  }
-                : isUpdate
-                  ? {
-                      sessionUpdate: "tool_call_update",
-                      toolCallId: data.toolCallId,
-                      status: "in_progress",
-                      rawOutput: data.partialResult,
-                    }
-                  : {
-                      sessionUpdate: "tool_call_update",
-                      toolCallId: data.toolCallId,
-                      status: data.isError === true ? "failed" : "completed",
-                      rawOutput: data.result,
-                    },
-            })
+              update,
+            } as unknown as AcpSchema.SessionNotification)
             .pipe(Effect.catch(() => Effect.void));
         }
         if (candidate?.type !== "text") return Effect.void;
@@ -617,7 +670,7 @@ function makeAgent(
           return {};
         },
         catch: (error) =>
-          error instanceof AcpError.AcpRequestError
+          Schema.is(AcpError.AcpRequestError)(error)
             ? error
             : AcpError.AcpRequestError.internalError(errorMessage(error)),
       }),
@@ -651,12 +704,15 @@ function makeAgent(
           sessionId: request.sessionId,
           update: { sessionUpdate: "state_update", state: "running" },
         });
-        const failureMessageId = crypto.randomUUID();
+        const failureMessageId = randomId();
 
         yield* Effect.forkIn(
           Effect.tryPromise({
             try: () => runtime.prompt(request.sessionId, prompt),
-            catch: (error) => error,
+            catch: (error) =>
+              Schema.is(AcpError.AcpRequestError)(error)
+                ? error
+                : AcpError.AcpRequestError.internalError(errorMessage(error)),
           }).pipe(
             Effect.flatMap((result) => {
               const runId = result.runId;

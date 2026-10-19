@@ -176,6 +176,7 @@ function makeAcpRegistryRuntime(
 export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(function* (
   options: AcpRegistryAdapterV2Options,
 ) {
+  const crypto = yield* Crypto.Crypto;
   const catalog = yield* AcpRegistrySupport.AcpRegistryCatalog;
   const runtimeCoordinator = Option.getOrUndefined(
     yield* Effect.serviceOption(AcpRegistryRuntimeCoordinator.AcpRegistryRuntimeCoordinator),
@@ -292,7 +293,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
               ) {
                 yield* registerSubpolarModelEgressExtension({ providerIds, context });
               }
-            }),
+            }).pipe(Effect.provideService(Crypto.Crypto, crypto)),
         }
       : flavor;
   return yield* makeAcpAdapterV2({

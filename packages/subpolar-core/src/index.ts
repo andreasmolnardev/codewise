@@ -1,3 +1,4 @@
+// @effect-diagnostics globalDate:off cryptoRandomUUID:off -- This package exposes a Promise based runtime with injectable clock ports.
 import { createHash } from "node:crypto";
 import type {
   ApprovalCallback,
@@ -186,7 +187,7 @@ function sanitizeExecutorError(error: unknown): ToolError {
       : "EXECUTION_FAILED";
   const message = redactedText(candidate.message, "Tool execution failed");
   const details = candidate.details === undefined ? undefined : redactAuditValue(candidate.details);
-  return { code, message, details };
+  return { code, message, ...(details === undefined ? {} : { details }) };
 }
 
 export function resolvePolicyDecision(rules: PolicyRules): PolicyDecision {
@@ -195,27 +196,27 @@ export function resolvePolicyDecision(rules: PolicyRules): PolicyDecision {
     return {
       kind: "deny",
       precedence: "deny",
-      policyId: rules.policyId,
+      ...(rules.policyId === undefined ? {} : { policyId: rules.policyId }),
       reason: rules.reason ?? "Tool denied by policy",
     };
   if (rules.requiresApproval)
     return {
       kind: "approval_required",
       precedence: "approval_required",
-      policyId: rules.policyId,
+      ...(rules.policyId === undefined ? {} : { policyId: rules.policyId }),
       reason: rules.reason ?? "Tool approval is required",
     };
   if (rules.allow)
     return {
       kind: "allow",
       precedence: "allow",
-      policyId: rules.policyId,
+      ...(rules.policyId === undefined ? {} : { policyId: rules.policyId }),
       reason: rules.reason ?? "Tool allowed by policy",
     };
   return {
     kind: "deny",
     precedence: "deny",
-    policyId: rules.policyId,
+    ...(rules.policyId === undefined ? {} : { policyId: rules.policyId }),
     reason: rules.reason ?? "Tool is not allowed by policy",
   };
 }
@@ -226,7 +227,11 @@ function policyRecords(source: PolicyRuleSource): {
 } {
   if (Array.isArray(source)) return { records: source };
   if (typeof source === "function") return { records: [] };
-  if ("policies" in source) return { records: source.policies, fallback: source.fallback };
+  if ("policies" in source)
+    return {
+      records: source.policies,
+      ...(source.fallback === undefined ? {} : { fallback: source.fallback }),
+    };
   if ("toolId" in source) return { records: [source] };
   return { records: [], fallback: source as PolicyRules };
 }
@@ -333,16 +338,15 @@ export function createPolicyGateway(options: GatewayOptions): ToolGateway {
         callId: safeCallId,
         toolId: redactedText(call.toolId, "[REDACTED]"),
         principalId: redactedText(context.principal.id, "[REDACTED]"),
-        sessionId:
-          context.sessionId === undefined
-            ? undefined
-            : redactedText(context.sessionId, "[REDACTED]"),
+        ...(context.sessionId === undefined
+          ? {}
+          : { sessionId: redactedText(context.sessionId, "[REDACTED]") }),
         requestId: redactedText(context.requestId, "[REDACTED]"),
         decision,
         status,
         input: redact(call.input),
-        result: result === undefined ? undefined : redact(result),
-        reason: reason === undefined ? undefined : redactedText(reason, "[REDACTED]"),
+        ...(result === undefined ? {} : { result: redact(result) }),
+        ...(reason === undefined ? {} : { reason: redactedText(reason, "[REDACTED]") }),
         occurredAt,
       };
       const event: AuditEvent = {
@@ -371,7 +375,7 @@ export function createPolicyGateway(options: GatewayOptions): ToolGateway {
     const error: ToolError = {
       code,
       message: redactedText(message, "Tool request failed"),
-      details: details === undefined ? undefined : redact(details),
+      ...(details === undefined ? {} : { details: redact(details) }),
     };
     await emitAudit(call, context, status, decision, message, error);
     return {
@@ -380,7 +384,7 @@ export function createPolicyGateway(options: GatewayOptions): ToolGateway {
       callId: redactedText(call.callId, "[REDACTED]"),
       toolId: redactedText(call.toolId, "[REDACTED]"),
       error,
-      approvalId: approvalId === undefined ? undefined : redactedText(approvalId, "[REDACTED]"),
+      ...(approvalId === undefined ? {} : { approvalId: redactedText(approvalId, "[REDACTED]") }),
     };
   }
 
@@ -448,7 +452,7 @@ export function createPolicyGateway(options: GatewayOptions): ToolGateway {
         definition,
         context,
         decision,
-        runId: call.runId,
+        ...(call.runId === undefined ? {} : { runId: call.runId }),
       };
       if (approvalStore) {
         approval = await approvalStore.load(approvalId);
@@ -821,7 +825,7 @@ export function createRunService(options: RunServiceOptions): RunService {
       occurredAt: now().toISOString(),
       runId: request.runId,
       requestId: request.context.requestId,
-      sessionId: request.context.sessionId,
+      ...(request.context.sessionId === undefined ? {} : { sessionId: request.context.sessionId }),
       state,
       data: data ?? runEventData(state, error),
     };
@@ -845,7 +849,7 @@ export function createRunService(options: RunServiceOptions): RunService {
     return {
       runId: request.runId,
       requestId: request.context.requestId,
-      sessionId: request.context.sessionId,
+      ...(request.context.sessionId === undefined ? {} : { sessionId: request.context.sessionId }),
       resumed,
       recoverable: false,
     };
@@ -876,7 +880,9 @@ export function createRunService(options: RunServiceOptions): RunService {
       await runStore.save({
         runId: request.runId,
         requestId: request.context.requestId,
-        sessionId: request.context.sessionId,
+        ...(request.context.sessionId === undefined
+          ? {}
+          : { sessionId: request.context.sessionId }),
         state,
         ...(output === undefined ? {} : { output }),
         ...(error === undefined ? {} : { error }),

@@ -100,7 +100,7 @@ export interface ThreadLaunchInput {
 
 type PreparationInput = Pick<
   ThreadLaunchInput,
-  "commandId" | "projectId" | "workspaceStrategy" | "initialMessage"
+  "commandId" | "projectId" | "workspaceStrategy" | "initialMessage" | "modelSelection"
 > & {
   readonly reusedWorktree?: { readonly baseRef: string };
 };
@@ -1100,6 +1100,7 @@ const make = Effect.gen(function* () {
       {
         commandId: input.commandId,
         projectId: projection.thread.projectId,
+        modelSelection: projection.thread.modelSelection,
         workspaceStrategy: reuse?.strategy ?? workspacePreparation,
         ...(reuse === null ? {} : { reusedWorktree: reuse.reusedWorktree }),
         ...(message === undefined

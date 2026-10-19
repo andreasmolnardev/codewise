@@ -11,6 +11,7 @@ import {
   type PiSdkModule,
   type PiSessionManager,
 } from "@subpolar/runtime-pi";
+// @ts-expect-error TS7016: The installed bundled SDK has no declaration file; its supported runtime surface is typed by PiSdkModule.
 import * as bundledPiSdk from "../../subpolar-core-pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js";
 
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
@@ -314,7 +315,7 @@ it.effect("completes an ACP turn with the real Pi SDK and a local mock model pro
               cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
             },
             stopReason: "stop",
-            timestamp: Date.now(),
+            timestamp: 1,
           };
           const events = async function* () {
             yield { type: "start", partial: message };
@@ -543,7 +544,7 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
               cwd: "/tmp/configured-pi",
               thinkingLevel: "high",
               instructions: "Follow the project-specific profile guidance.",
-              resumeSessionIds: new Set(),
+              resumeSessionIds: new Set<string>(),
             });
             assert.deepEqual(
               request!.toolDefinitions?.map(({ id }) => id),
@@ -581,7 +582,17 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
     }
     const params = permissionRequest.params as {
       sessionId: string;
-      subject: { type: string; toolCall: { toolCallId: string; name: string; rawInput: unknown } };
+      subject: {
+        type: string;
+        toolCall: {
+          toolCallId: string;
+          kind?: string;
+          status?: string;
+          title?: string;
+          name: string;
+          rawInput: unknown;
+        };
+      };
       options: Array<{ optionId: string; kind: string }>;
     };
     assert.equal(params.sessionId, sessionId);
