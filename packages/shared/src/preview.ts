@@ -1,7 +1,36 @@
 import * as Schema from "effect/Schema";
 
+import { isLocalLoopbackHost } from "./hostClassification.ts";
+
 const TAB_ID_PREFIX = "tab_";
 let nextPreviewTabSequence = 0;
+
+export function previewPdfAssetUrl(rawUrl: string, httpBaseUrl: string | null): string | null {
+  if (httpBaseUrl === null) return null;
+  try {
+    const url = new URL(rawUrl);
+    const baseUrl = new URL(httpBaseUrl);
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      !url.pathname.startsWith("/api/assets/") ||
+      !/\.pdf$/i.test(url.pathname)
+    ) {
+      return null;
+    }
+    if (
+      url.origin !== baseUrl.origin &&
+      !isLocalLoopbackHost(url.hostname) &&
+      url.hostname !== "0.0.0.0"
+    ) {
+      return url.href;
+    }
+    // The browser may run on the host's loopback address. Fetch signed bytes
+    // through this client's environment connection, including remote routes.
+    return new URL(`${url.pathname}${url.search}${url.hash}`, baseUrl).href;
+  } catch {
+    return null;
+  }
+}
 
 export function newPreviewTabId(): string {
   nextPreviewTabSequence += 1;
@@ -49,6 +78,7 @@ function previewUrlProtocol(rawUrl: string): string | undefined {
 const SEARCH_URL = "https://duckduckgo.com/?q=";
 const ADDRESS_HOST_PATTERN = /^(?:localhost|\d{1,3}(?:\.\d{1,3}){3}|\[[\da-f:.]+\])$/i;
 const BARE_HOST_PORT_PATTERN = /^[^/?#:@]+:\d+(?:[/?#]|$)/;
+const URL_SCHEME_WITH_AUTHORITY_PATTERN = /^[a-z][a-z\d+.-]*:\/\//i;
 const KNOWN_NON_WEB_SCHEMES: ReadonlySet<string> = new Set([
   "about:",
   "blob:",
@@ -68,7 +98,7 @@ const KNOWN_NON_WEB_SCHEMES: ReadonlySet<string> = new Set([
 
 export function resolveAddressBarInput(rawInput: string): string {
   const trimmed = rawInput.trim();
-  if (/^[a-z][a-z\d+.-]*:\/\//i.test(trimmed) || trimmed.length === 0)
+  if (URL_SCHEME_WITH_AUTHORITY_PATTERN.test(trimmed) || trimmed.length === 0)
     return normalizePreviewUrl(trimmed);
   if (!/\s/.test(trimmed)) {
     // `mailto:x` or `data:...` is an explicit scheme; `example.com:8080` or
@@ -106,7 +136,7 @@ export function normalizePreviewUrl(rawUrl: string): string {
     throw new PreviewUrlNormalizationError({ inputLength: rawUrl.length, reason: "empty" });
   }
   const useHttp = LOOPBACK_PREFIX_PATTERN.test(trimmed);
-  const candidate = trimmed.includes("://")
+  const candidate = URL_SCHEME_WITH_AUTHORITY_PATTERN.test(trimmed)
     ? trimmed
     : `${useHttp ? "http" : "https"}://${trimmed}`;
   let parsed: URL;

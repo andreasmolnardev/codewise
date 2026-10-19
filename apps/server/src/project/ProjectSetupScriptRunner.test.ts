@@ -111,7 +111,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       NO_COLOR: "1",
       FORCE_COLOR: "0",
     });
-    assert.equal(write.mock.calls[0]?.[0].data, "vp install\r");
+    assert.equal(write.mock.calls[0]?.[0].data, " vp install\r");
     const lines: string[] = [];
     const observed = yield* runner.runForThread({
       threadId: "thread-1",
@@ -125,6 +125,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       },
     });
     assert.equal(observed.status, "started");
+    assert.match(write.mock.calls[1]?.[0].data ?? "", /^ \S/);
     const listener = listeners[0]!;
     yield* listener({
       type: "output",
@@ -143,7 +144,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     });
     const settleTerminalId = settle.status === "started" ? settle.terminalId : "";
     assert.match(settleTerminalId, /^settle-clean-/);
-    assert.equal(write.mock.calls.at(-1)?.[0].data, "cargo clean\r");
+    assert.equal(write.mock.calls.at(-1)?.[0].data, " cargo clean\r");
 
     const observedSettle = yield* runner.runForThread({
       threadId: "thread-1",
@@ -154,6 +155,7 @@ it.effect("resolves setup scripts through the standalone project service", () =>
     });
     const observedTerminalId = observedSettle.status === "started" ? observedSettle.terminalId : "";
     assert.notEqual(observedTerminalId, settleTerminalId);
+    assert.match(write.mock.calls.at(-1)?.[0].data ?? "", /^ \S/);
     const token = /__T3_SETUP_DONE___(\w+):/.exec(write.mock.calls.at(-1)?.[0].data ?? "")?.[1];
     const settleListener = listeners.at(-1)!;
     const completion = yield* Effect.forkChild(
