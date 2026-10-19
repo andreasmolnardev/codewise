@@ -2,6 +2,7 @@ name: codewise-subpolar
 
 services:
   gateway:
+    image: ${SUBPOLAR_GATEWAY_IMAGE:-codewise-subpolar-gateway:local}
     build:
       context: ..
       dockerfile: docker/t3-gateway.Dockerfile
@@ -45,6 +46,7 @@ services:
     restart: unless-stopped
 
   subpolar-manager:
+    image: ${SUBPOLAR_MANAGER_IMAGE:-codewise-subpolar-manager:local}
     build:
       context: ..
       dockerfile: docker/subpolar-manager.Dockerfile

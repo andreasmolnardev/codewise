@@ -19,6 +19,10 @@ SUBPOLAR_DOCKER_GID=999
 SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS=
 # Optional: override the worker image name.
 SUBPOLAR_WORKER_IMAGE=codewise-subpolar-worker:local
+# Optional: use the production image published by GitHub Actions instead of building the gateway locally.
+SUBPOLAR_GATEWAY_IMAGE=ghcr.io/andreasmolnardev/codewise:latest
+# Optional: override the locally built manager image name.
+SUBPOLAR_MANAGER_IMAGE=codewise-subpolar-manager:local
 # Optional: exact Dev Container Feature references allowed by the manager.
 SUBPOLAR_ALLOWED_DEVCONTAINER_FEATURES=
 # Optional: select a repository-relative config if a worktree has several.
@@ -70,6 +74,9 @@ network may still reach services exposed by the Docker host. See
 [`dev-containers.md`](dev-containers.md) for the supported configuration
 subset and Feature lock/allowlist requirements.
 
-For upgrades, run the same `up -d --build` command. Keep the named volumes for
+When using the GitHub-published gateway image, build the manager and worker
+locally first, then start with `up -d --no-build`; Compose pulls the configured
+gateway image and reuses the named local manager image. For local gateway
+builds and upgrades, run the same `up -d --build` command. Keep the named volumes for
 T3 state, manager registration, and provider configuration. Back up those
 volumes and the workspace directory before removing the deployment.
