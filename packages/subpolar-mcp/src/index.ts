@@ -4,6 +4,7 @@ import {
   createMcpAdapter as createSubpolarAdapter,
   type McpClient,
   type McpLimits,
+  type McpTransportFactory,
   type McpTool,
 } from "./subpolarAdapter.ts";
 import { isPrivateHost } from "./networkPolicy.ts";
@@ -31,6 +32,10 @@ export interface ProviderMcpRegistryOptions {
   readonly providerInstanceId: string;
   /** Server hostnames explicitly approved by the host's server-side policy. */
   readonly allowedHosts: readonly string[];
+  /** Provider-instance credentials used to resolve header environment references. */
+  readonly environment?: Readonly<Record<string, string | undefined>>;
+  /** Transport override for host-controlled adapters and focused tests. */
+  readonly transportFactory?: McpTransportFactory;
 }
 
 export interface SubpolarMcpConnection {
@@ -170,7 +175,11 @@ export function createProviderMcpRegistry(options: ProviderMcpRegistryOptions) {
       if (closed) throw new Error("MCP provider registry is closed");
       const config = validatedConfig(input, options.providerInstanceId, hosts);
       await this.closeServer(input.id);
-      const adapter = createSubpolarAdapter({ limits });
+      const adapter = createSubpolarAdapter({
+        limits,
+        ...(options.environment ? { environment: options.environment } : {}),
+        ...(options.transportFactory ? { transportFactory: options.transportFactory } : {}),
+      });
       const client = await adapter.connect(config);
       clients.set(input.id, { adapter, client });
       const assertActive = () => {

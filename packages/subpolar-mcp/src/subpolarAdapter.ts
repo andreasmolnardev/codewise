@@ -62,6 +62,8 @@ export type McpServerConfig = {
 export type McpClientOptions = {
   fetch?: typeof globalThis.fetch
   limits?: Partial<McpLimits>
+  /** Environment used to resolve `{ env: NAME }` references. Defaults to process.env. */
+  environment?: Readonly<Record<string, string | undefined>>
   clientName?: string
   clientVersion?: string
 }
@@ -281,16 +283,16 @@ function errorForTransport(error: unknown, message: string, config: McpServerCon
   return new McpAdapterError('MCP_CONNECTION_ERROR', redactSensitiveText(`${message}: ${error instanceof Error ? error.message : String(error)}`), { serverKey: serverKeyFor(config), cause: error })
 }
 
-function resolveEnvValue(value: unknown): string | undefined {
+function resolveEnvValue(value: unknown, environment: Readonly<Record<string, string | undefined>> = process.env): string | undefined {
   if (typeof value === 'string') return value
   const record = object(value)
-  return typeof record.env === 'string' ? process.env[record.env] : undefined
+  return typeof record.env === 'string' ? environment[record.env] : undefined
 }
 
-function resolveHeaders(headers: Record<string, McpHeaderValue> | undefined): Record<string, string> {
+function resolveHeaders(headers: Record<string, McpHeaderValue> | undefined, environment?: Readonly<Record<string, string | undefined>>): Record<string, string> {
   const resolved: Record<string, string> = {}
   for (const [name, value] of Object.entries(headers ?? {})) {
-    const result = resolveEnvValue(value)
+    const result = resolveEnvValue(value, environment)
     if (result !== undefined) resolved[name] = result
   }
   return resolved
@@ -832,14 +834,14 @@ export class DefaultMcpAdapter implements McpAdapter {
     // serverKey is a display label, not an authentication/context identity.
     const effective = structuredClone({ ...this.options.defaults, ...config, limits: { ...this.options.defaults?.limits, ...config.limits, ...this.options.limits } })
     if (effective.env) effective.env = Object.fromEntries(Object.entries(effective.env).flatMap(([key, value]) => {
-      const resolved = resolveEnvValue(value)
+      const resolved = resolveEnvValue(value, this.options.environment)
       return resolved === undefined ? [] : [[key, resolved]]
     }))
     if (effective.transport === 'stdio') {
       effective.cwd ??= process.cwd()
       effective.env = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined)), ...effective.env }
     }
-    if (effective.headers) effective.headers = resolveHeaders(effective.headers)
+    if (effective.headers) effective.headers = resolveHeaders(effective.headers, this.options.environment)
     const canonical = (value: unknown): unknown => Array.isArray(value) ? value.map(canonical) : value && typeof value === 'object'
       ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, canonical(item)])) : value
     const key = effective.ownerId?.trim()

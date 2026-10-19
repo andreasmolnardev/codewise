@@ -65,6 +65,81 @@ export const ProviderInstanceMcpServerConfig = Schema.Struct({
 });
 export type ProviderInstanceMcpServerConfig = typeof ProviderInstanceMcpServerConfig.Type;
 
+export const ProviderInstanceMcpServerSummary = Schema.Struct({
+  id: ProviderInstanceMcpServerConfig.fields.id,
+  url: TrimmedNonEmptyString,
+  namespace: TrimmedNonEmptyString,
+  timeoutMs: Schema.optional(Schema.Int),
+  headerNames: Schema.Array(TrimmedNonEmptyString),
+});
+export type ProviderInstanceMcpServerSummary = typeof ProviderInstanceMcpServerSummary.Type;
+
+export const ProviderInstanceMcpToolSummary = Schema.Struct({
+  name: TrimmedNonEmptyString,
+  description: Schema.String,
+  inputSchema: Schema.Record(Schema.String, Schema.Unknown),
+  outputSchema: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  annotations: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
+  namespace: Schema.optional(TrimmedNonEmptyString),
+  toolId: TrimmedNonEmptyString,
+});
+export type ProviderInstanceMcpToolSummary = typeof ProviderInstanceMcpToolSummary.Type;
+
+export const ProviderInstanceMcpAdminInput = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("listServers"),
+    providerInstanceId: ProviderInstanceId,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("configureServer"),
+    providerInstanceId: ProviderInstanceId,
+    config: ProviderInstanceMcpServerConfig,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("removeServer"),
+    providerInstanceId: ProviderInstanceId,
+    serverId: ProviderInstanceMcpServerConfig.fields.id,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("listTools"),
+    providerInstanceId: ProviderInstanceId,
+    serverId: ProviderInstanceMcpServerConfig.fields.id,
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("inspectTool"),
+    providerInstanceId: ProviderInstanceId,
+    serverId: ProviderInstanceMcpServerConfig.fields.id,
+    toolName: TrimmedNonEmptyString,
+  }),
+]);
+export type ProviderInstanceMcpAdminInput = typeof ProviderInstanceMcpAdminInput.Type;
+
+export const ProviderInstanceMcpAdminResult = Schema.Union([
+  Schema.Struct({
+    operation: Schema.Literal("listServers"),
+    servers: Schema.Array(ProviderInstanceMcpServerSummary),
+  }),
+  Schema.Struct({
+    operation: Schema.Literal("configureServer"),
+    server: ProviderInstanceMcpServerSummary,
+  }),
+  Schema.Struct({ operation: Schema.Literal("removeServer"), removed: Schema.Boolean }),
+  Schema.Struct({
+    operation: Schema.Literal("listTools"),
+    tools: Schema.Array(ProviderInstanceMcpToolSummary),
+  }),
+  Schema.Struct({ operation: Schema.Literal("inspectTool"), tool: ProviderInstanceMcpToolSummary }),
+]);
+export type ProviderInstanceMcpAdminResult = typeof ProviderInstanceMcpAdminResult.Type;
+
+export class ProviderInstanceMcpAdminError extends Schema.TaggedError<ProviderInstanceMcpAdminError>()(
+  "ProviderInstanceMcpAdminError",
+  {
+    reason: Schema.Literals(["invalid_configuration", "server_unavailable", "not_found"]),
+    message: TrimmedNonEmptyString,
+  },
+) {}
+
 /**
  * The driver-specific config payload is left as `Schema.Unknown`; each driver
  * registers its own decoder with the runtime registry, and envelopes for

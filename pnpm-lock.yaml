@@ -754,6 +754,9 @@ importers:
       "@subpolar/environments":
         specifier: workspace:*
         version: link:../../packages/subpolar-environments
+      "@subpolar/mcp":
+        specifier: workspace:*
+        version: link:../../packages/subpolar-mcp
     devDependencies:
       '@effect/vitest':
         specifier: 4.0.5

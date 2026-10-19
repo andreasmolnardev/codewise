@@ -42,6 +42,12 @@ describe("RPC authorization scopes", () => {
     );
   });
 
+  it("requires settings-write access for provider MCP administration", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverManageProviderMcp)).toBe(
+      AuthSettingsWriteScope,
+    );
+  });
+
   it("authorizes background policy reporting and observation deliberately", () => {
     expect(requiredScopeForRpcMethod(WS_METHODS.serverReportClientActivity)).toBe(
       AuthOrchestrationReadScope,
