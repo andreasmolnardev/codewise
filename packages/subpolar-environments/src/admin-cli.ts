@@ -23,6 +23,7 @@ const defaultIo: AdminCliIo = {
 
 const usage = `Usage:
   subpolar status [--json]
+  subpolar doctor [--json]
   subpolar environments list [--owner-id ID] [--json]
   subpolar environments inspect WORKTREE [--json]
   subpolar environments start|stop|restart|remove|rebuild WORKTREE [--json]
@@ -60,7 +61,11 @@ function requiredEnvironment(environment: NodeJS.ProcessEnv, key: string): strin
   return value;
 }
 
-function requestFor(worktree: string, environment: NodeJS.ProcessEnv, ownerId?: string): EnvironmentRequest {
+function requestFor(
+  worktree: string,
+  environment: NodeJS.ProcessEnv,
+  ownerId?: string,
+): EnvironmentRequest {
   const storageRoot = requiredEnvironment(environment, "SUBPOLAR_STORAGE_ROOT");
   const resolvedRoot = path.resolve(storageRoot);
   const resolvedWorktree = path.resolve(worktree);
@@ -91,11 +96,101 @@ function renderEnvironment(environment: EnvironmentRegistration["environment"]):
 }
 
 function validatePathArgument(args: readonly string[]): string {
-  if (args.length !== 1 || !args[0]?.trim()) throw new CliUsageError("Provide exactly one worktree path");
+  if (args.length !== 1 || !args[0]?.trim())
+    throw new CliUsageError("Provide exactly one worktree path");
   return args[0];
 }
 
-export async function runAdminCli(argv: readonly string[], dependencies: AdminCliDependencies = {}): Promise<number> {
+type DoctorCheck = {
+  readonly name: string;
+  readonly status: "passed" | "failed" | "skipped";
+  readonly message: string;
+  readonly action?: string;
+};
+
+async function runDoctor(
+  environment: NodeJS.ProcessEnv,
+  fetcher: typeof fetch | undefined,
+  io: AdminCliIo,
+  json: boolean,
+): Promise<number> {
+  const managerUrlConfigured = Boolean(environment.SUBPOLAR_MANAGER_URL?.trim());
+  const managerTokenConfigured = Boolean(environment.SUBPOLAR_MANAGER_TOKEN?.trim());
+  const checks: DoctorCheck[] = [
+    managerUrlConfigured
+      ? { name: "managerUrl", status: "passed", message: "Manager URL is configured." }
+      : {
+          name: "managerUrl",
+          status: "failed",
+          message: "Manager URL is missing.",
+          action: "Set SUBPOLAR_MANAGER_URL to the manager endpoint.",
+        },
+    managerTokenConfigured
+      ? {
+          name: "managerToken",
+          status: "passed",
+          message: "Manager token is configured; its value is hidden.",
+        }
+      : {
+          name: "managerToken",
+          status: "failed",
+          message: "Manager token is missing.",
+          action: "Set SUBPOLAR_MANAGER_TOKEN; doctor never prints its value.",
+        },
+  ];
+
+  if (managerUrlConfigured && managerTokenConfigured) {
+    try {
+      const status = await environmentClient(environment, fetcher).status!();
+      checks.push({
+        name: "managerAuthentication",
+        status: "passed",
+        message: `Authenticated manager status check succeeded (${status.registeredEnvironmentCount} registered environment(s)).`,
+      });
+    } catch (error) {
+      const unauthorized = error instanceof Error && /\((?:401|403),/.test(error.message);
+      checks.push(
+        unauthorized
+          ? {
+              name: "managerAuthentication",
+              status: "failed",
+              message: "The manager rejected the configured token.",
+              action: "Check that SUBPOLAR_MANAGER_TOKEN matches the manager's admin token.",
+            }
+          : {
+              name: "managerAuthentication",
+              status: "failed",
+              message: "The authenticated manager status check failed.",
+              action:
+                "Check the manager URL and token configuration, and confirm the manager is running and reachable.",
+            },
+      );
+    }
+  } else {
+    checks.push({
+      name: "managerAuthentication",
+      status: "skipped",
+      message: "Manager authentication was not checked because its URL or token is missing.",
+    });
+  }
+
+  const failed = checks.some((check) => check.status === "failed");
+  if (json) {
+    io.stdout(`${JSON.stringify({ ok: !failed, checks }, null, 2)}\n`);
+  } else {
+    io.stdout(`Subpolar doctor: ${failed ? "needs attention" : "ready"}\n`);
+    for (const check of checks) {
+      const marker = check.status === "passed" ? "✓" : check.status === "failed" ? "✗" : "-";
+      io.stdout(`${marker} ${check.message}${check.action ? ` ${check.action}` : ""}\n`);
+    }
+  }
+  return failed ? 1 : 0;
+}
+
+export async function runAdminCli(
+  argv: readonly string[],
+  dependencies: AdminCliDependencies = {},
+): Promise<number> {
   const environment = dependencies.environment ?? process.env;
   const io = dependencies.io ?? defaultIo;
   try {
@@ -105,26 +200,51 @@ export async function runAdminCli(argv: readonly string[], dependencies: AdminCl
       io.stdout(usage);
       return 0;
     }
+    if (group === "doctor") {
+      if (command !== undefined)
+        throw new CliUsageError("doctor does not accept positional arguments");
+      return await runDoctor(environment, dependencies.fetch, io, parsed.json);
+    }
     const client = environmentClient(environment, dependencies.fetch);
     if (group === "status" && command === undefined) {
       const status = await client.status!();
-      print(io, parsed.json, status, `Environment manager ready; ${status.registeredEnvironmentCount} registered environment(s)`);
+      print(
+        io,
+        parsed.json,
+        status,
+        `Environment manager ready; ${status.registeredEnvironmentCount} registered environment(s)`,
+      );
       return 0;
     }
-    if (group !== "environments" || command === undefined) throw new CliUsageError("Unknown command");
+    if (group !== "environments" || command === undefined)
+      throw new CliUsageError("Unknown command");
 
     if (command === "list") {
-      if (rest.length > 0) throw new CliUsageError("environments list does not accept positional arguments");
+      if (rest.length > 0)
+        throw new CliUsageError("environments list does not accept positional arguments");
       const entries = await client.list!(parsed.ownerId ?? environment.SUBPOLAR_OWNER_ID?.trim());
       const value = { environments: entries };
-      print(io, parsed.json, value, entries.length ? entries.map((entry) => renderEnvironment(entry.environment)).join("\n") : "No registered environments");
+      print(
+        io,
+        parsed.json,
+        value,
+        entries.length
+          ? entries.map((entry) => renderEnvironment(entry.environment)).join("\n")
+          : "No registered environments",
+      );
       return 0;
     }
     if (command === "reconcile") {
-      if (rest.length > 0) throw new CliUsageError("environments reconcile does not accept positional arguments");
+      if (rest.length > 0)
+        throw new CliUsageError("environments reconcile does not accept positional arguments");
       const results = await client.reconcile();
       const failed = results.filter((result) => result.error !== undefined).length;
-      print(io, parsed.json, { results, failed }, `${results.length} environment(s) reconciled; ${failed} failed`);
+      print(
+        io,
+        parsed.json,
+        { results, failed },
+        `${results.length} environment(s) reconciled; ${failed} failed`,
+      );
       return failed === 0 ? 0 : 1;
     }
 
@@ -156,7 +276,12 @@ export async function runAdminCli(argv: readonly string[], dependencies: AdminCl
     }
     if (command === "remove") {
       await client.remove(request);
-      print(io, parsed.json, { removed: true, worktreePath: request.worktreePath }, `Removed environment for ${request.worktreePath}`);
+      print(
+        io,
+        parsed.json,
+        { removed: true, worktreePath: request.worktreePath },
+        `Removed environment for ${request.worktreePath}`,
+      );
       return 0;
     }
     if (command === "rebuild") {
@@ -170,7 +295,9 @@ export async function runAdminCli(argv: readonly string[], dependencies: AdminCl
       io.stderr(`${error.message}\n${usage}`);
       return 2;
     }
-    io.stderr(`Subpolar environment command failed: ${error instanceof Error ? error.message : "unknown error"}\n`);
+    io.stderr(
+      `Subpolar environment command failed: ${error instanceof Error ? error.message : "unknown error"}\n`,
+    );
     return 1;
   }
 }
