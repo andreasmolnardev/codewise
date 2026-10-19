@@ -243,6 +243,7 @@ export interface ToolRegistryOptions {
   adapters?: readonly ToolAdapter[];
   /** No policy means deny; authorization is never implicitly granted. */
   policy?: ToolPolicy;
+  /** When configured, this is the authoritative source for identity and scope. */
   context?: ContextBoundary;
   persistence?: ToolPersistenceBoundary;
   redaction?: RedactionHooks;
@@ -261,7 +262,9 @@ export interface ToolRegistry {
   registerTool(input: ToolDefinitionInput): ToolDefinition;
   get(toolId: string): ToolDefinition | undefined;
   list(): readonly ToolDefinition[];
+  /** A configured context boundary takes precedence over caller-supplied context. */
   authorize(call: ToolCall, context?: ToolContext): Promise<ToolAuthorization>;
+  /** A configured context boundary takes precedence over caller-supplied context. */
   execute<T = unknown>(call: ToolCall, context?: ToolContext): Promise<ToolExecutionResult<T>>;
   /**
    * Invoke only a capability produced by authorize on this registry instance.
@@ -500,8 +503,11 @@ export class DefaultToolRegistry implements ToolRegistry {
   }
 
   private async resolvedContext(call: ToolCall, context?: ToolContext): Promise<ToolContext> {
-    if (context) return context;
-    return (await this.resolveContext?.(call)) ?? {};
+    // A per-call context is useful for standalone registries, but accepting it
+    // when a host boundary is configured lets a caller spoof the principal that
+    // policy decisions and owner-scoped MCP connections rely on.
+    if (this.resolveContext) return this.resolveContext(call);
+    return context ?? {};
   }
 
   async authorize(call: ToolCall, context?: ToolContext): Promise<ToolAuthorization> {

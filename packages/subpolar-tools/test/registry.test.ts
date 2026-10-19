@@ -105,6 +105,34 @@ describe("@subpolar/tools registry", () => {
     expect(executions).toBe(0);
   });
 
+  test("uses the configured host context instead of caller-supplied identity", async () => {
+    const policyPrincipals: unknown[] = [];
+    const adapterPrincipals: unknown[] = [];
+    const registry = createToolRegistry({
+      adapters: [{ kind: "mcp", execute: async ({ context }) => {
+        adapterPrincipals.push(context.principal);
+        return "called";
+      } }],
+      context: () => ({ principal: { id: "trusted-user", kind: "user" } }),
+      policy: (_definition, context) => {
+        policyPrincipals.push(context.principal);
+        return (context.principal as { id?: string } | undefined)?.id === "trusted-user"
+          ? { kind: "allow" }
+          : { kind: "deny" };
+      },
+    });
+    registry.registerTool({ adapter: "mcp", namespace: "remote", name: "read" });
+
+    const result = await registry.execute(
+      { callId: "mcp-spoof", toolId: "mcp/remote/read", input: {} },
+      { principal: { id: "attacker", kind: "admin" } },
+    );
+
+    expect(result).toEqual({ ok: true, value: "called" });
+    expect(policyPrincipals).toEqual([{ id: "trusted-user", kind: "user" }]);
+    expect(adapterPrincipals).toEqual([{ id: "trusted-user", kind: "user" }]);
+  });
+
   test("does not allow execution to bypass policy or manufacture authorization", async () => {
     let executions = 0;
     const registry = createToolRegistry({

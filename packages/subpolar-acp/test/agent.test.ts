@@ -6,6 +6,7 @@ import * as Queue from "effect/Queue";
 import * as Scope from "effect/Scope";
 
 import { assert, it } from "@effect/vitest";
+import { createPiSdkExecutorFactory, type PiSdkModule, type PiSessionManager } from "@subpolar/runtime-pi";
 
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
 import { layer } from "../src/index.ts";
@@ -43,6 +44,59 @@ const initialize = request(1, "initialize", {
   capabilities: {},
 });
 
+function makeMockPiSdk(appendedByTurn: unknown[][], prompts: string[]): PiSdkModule {
+  let nextSessionId = 0;
+  return {
+    getAgentDir: () => "/tmp/subpolar-acp-test/agent",
+    SessionManager: {
+      inMemory: (cwd = "/tmp/subpolar-acp-test") => {
+        const appended: unknown[] = [];
+        appendedByTurn.push(appended);
+        const sessionId = `mock-pi-session-${++nextSessionId}`;
+        return {
+          appendMessage: (message) => appended.push(message),
+          getCwd: () => cwd,
+          getSessionId: () => sessionId,
+          getSessionFile: () => undefined,
+          isPersisted: () => false,
+        } satisfies PiSessionManager;
+      },
+      create: () => { throw new Error("Mock Pi SDK does not persist sessions"); },
+      findById: () => undefined,
+      open: () => { throw new Error("Mock Pi SDK does not persist sessions"); },
+    },
+    SettingsManager: { inMemory: () => ({}) },
+    DefaultResourceLoader: class {
+      async reload() {}
+    },
+    async createAgentSession() {
+      const messages: Array<{ role: string; content?: unknown; stopReason?: string }> = [];
+      const listeners = new Set<(event: unknown) => void>();
+      return {
+        session: {
+          subscribe(listener) {
+            listeners.add(listener);
+            return () => listeners.delete(listener);
+          },
+          async prompt(prompt) {
+            prompts.push(prompt);
+            const text = `mock Pi answer: ${prompt}`;
+            for (const listener of listeners) listener({ type: "text", data: { text } });
+            messages.push({
+              role: "assistant",
+              content: [{ type: "text", text }],
+              stopReason: "stop",
+            });
+          },
+          async abort() {},
+          dispose() {},
+          get messages() { return messages; },
+        },
+      };
+    },
+  };
+}
+
 it.effect("runs a prompt through an injected Pi executor and keeps the ACP session ephemeral", () =>
   Effect.gen(function* () {
     const { stdio, input, output } = yield* makeInMemoryStdio();
@@ -79,6 +133,79 @@ it.effect("runs a prompt through an injected Pi executor and keeps the ACP sessi
     assert.equal(promptResponse.id, 3);
     assert.deepEqual(seen, [{ cwd: "/tmp/subpolar-acp-test", sessionId }]);
 
+    yield* Scope.close(scope, Exit.void);
+  }),
+);
+
+it.effect("completes mock Pi turns through ACP and carries T3 session history into the next Pi run", () =>
+  Effect.gen(function* () {
+    const { stdio, input, output } = yield* makeInMemoryStdio();
+    const scope = yield* Scope.make();
+    const appendedByTurn: unknown[][] = [];
+    const prompts: string[] = [];
+    const sdk = makeMockPiSdk(appendedByTurn, prompts);
+    yield* Layer.buildWithScope(layer(stdio, {
+      executorFactory: createPiSdkExecutorFactory(async () => sdk),
+    }), scope);
+
+    yield* send(input, initialize);
+    yield* readResponse(output, 1);
+    yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
+    const created = yield* readResponse(output, 2);
+    const sessionId = (created.result as { sessionId: string }).sessionId;
+
+    const completedTurn = (requestId: number, prompt: string) =>
+      Effect.gen(function* () {
+        yield* send(input, request(requestId, "session/prompt", {
+          sessionId,
+          prompt: [{ type: "text", text: prompt }],
+        }));
+        const updates: Array<Record<string, unknown>> = [];
+        let responseReceived = false;
+        let turnCompleted = false;
+        while (!responseReceived || !turnCompleted) {
+          const message = yield* readJsonLine(output);
+          if (message.id === requestId) responseReceived = true;
+          if (message.method !== "session/update") continue;
+          const params = message.params as { update?: Record<string, unknown> };
+          if (!params.update) continue;
+          updates.push(params.update);
+          if (params.update.sessionUpdate === "state_update" && params.update.state === "idle") {
+            turnCompleted = true;
+          }
+        }
+        return updates;
+      });
+
+    const firstUpdates = yield* completedTurn(3, "first prompt");
+    assert.isTrue(firstUpdates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      (update.content as { text?: string } | undefined)?.text === "mock Pi answer: first prompt",
+    ));
+    assert.deepEqual(firstUpdates.at(-1), {
+      sessionUpdate: "state_update",
+      state: "idle",
+      stopReason: "end_turn",
+    });
+
+    const secondUpdates = yield* completedTurn(4, "second prompt");
+    assert.isTrue(secondUpdates.some((update) =>
+      update.sessionUpdate === "agent_message_chunk" &&
+      (update.content as { text?: string } | undefined)?.text === "mock Pi answer: second prompt",
+    ));
+    assert.deepEqual(secondUpdates.at(-1), {
+      sessionUpdate: "state_update",
+      state: "idle",
+      stopReason: "end_turn",
+    });
+    assert.deepEqual(prompts, ["first prompt", "second prompt"]);
+    assert.deepEqual(appendedByTurn[0], []);
+    const projectedHistory = appendedByTurn[1] as Array<Record<string, unknown>>;
+    assert.deepEqual(projectedHistory.map(({ timestamp: _timestamp, ...entry }) => entry), [
+      { role: "custom", customType: "subpolar.user", content: "first prompt", display: false },
+      { role: "custom", customType: "subpolar.assistant", content: JSON.stringify({ text: "mock Pi answer: first prompt" }), display: false },
+    ]);
+    assert.isTrue(projectedHistory.every((entry) => typeof entry.timestamp === "number"));
     yield* Scope.close(scope, Exit.void);
   }),
 );
