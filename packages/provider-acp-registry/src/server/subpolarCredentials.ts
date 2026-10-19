@@ -15,7 +15,14 @@ const MAX_TRANSACTION_MS = 30_000;
 
 const Request = Schema.Struct({
   sessionId: Schema.String,
-  operation: Schema.Literals(["read", "list", "beginModify", "commitModify", "abortModify", "delete"]),
+  operation: Schema.Literals([
+    "read",
+    "list",
+    "beginModify",
+    "commitModify",
+    "abortModify",
+    "delete",
+  ]),
   providerId: Schema.optional(Schema.String),
   transactionId: Schema.optional(Schema.String),
   credential: Schema.optional(Schema.Unknown),
@@ -42,25 +49,41 @@ export function isPiCredential(value: unknown): value is Credential {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
   if (candidate.type === "api_key") {
-    return (candidate.key === undefined || typeof candidate.key === "string") &&
-      (candidate.env === undefined || (typeof candidate.env === "object" && candidate.env !== null && !Array.isArray(candidate.env)));
+    return (
+      (candidate.key === undefined || typeof candidate.key === "string") &&
+      (candidate.env === undefined ||
+        (typeof candidate.env === "object" &&
+          candidate.env !== null &&
+          !Array.isArray(candidate.env)))
+    );
   }
-  return candidate.type === "oauth" && typeof candidate.access === "string" &&
-    typeof candidate.refresh === "string" && typeof candidate.expires === "number";
+  return (
+    candidate.type === "oauth" &&
+    typeof candidate.access === "string" &&
+    typeof candidate.refresh === "string" &&
+    typeof candidate.expires === "number"
+  );
 }
 
 export function parsePiCredentialStore(bytes: Uint8Array | undefined): CredentialMap {
   if (!bytes) return {};
   if (bytes.byteLength > MAX_STORE_BYTES) throw new Error("Credential store is invalid");
   const parsed: unknown = JSON.parse(new TextDecoder().decode(bytes));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed) || !("credentials" in parsed)) {
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    Array.isArray(parsed) ||
+    !("credentials" in parsed)
+  ) {
     throw new Error("Credential store is invalid");
   }
   const records = (parsed as { credentials: unknown }).credentials;
-  if (!records || typeof records !== "object" || Array.isArray(records)) throw new Error("Credential store is invalid");
+  if (!records || typeof records !== "object" || Array.isArray(records))
+    throw new Error("Credential store is invalid");
   const result: CredentialMap = Object.create(null) as CredentialMap;
   for (const [providerId, credential] of Object.entries(records)) {
-    if (!isPiProviderId(providerId) || !isPiCredential(credential)) throw new Error("Credential store is invalid");
+    if (!isPiProviderId(providerId) || !isPiCredential(credential))
+      throw new Error("Credential store is invalid");
     result[providerId] = credential;
   }
   return result;
@@ -128,7 +151,9 @@ export function removePiCredential(input: {
 function acquireInstanceLock(instanceId: string): Promise<() => void> {
   const previous = tailsByInstance.get(instanceId) ?? Promise.resolve();
   let release!: () => void;
-  const next = new Promise<void>((resolve) => { release = resolve; });
+  const next = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   const tail = previous.then(() => next);
   tailsByInstance.set(instanceId, tail);
   return previous.then(() => () => {
@@ -169,88 +194,125 @@ export function registerSubpolarCredentialExtension(input: {
         catch: () => new Error("Credential store is invalid"),
       });
     });
-    const persist = (credentials: CredentialMap) => Effect.gen(function* () {
-      if (Object.keys(credentials).length === 0) yield* store.remove;
-      else yield* store.set(encodePiCredentialStore(credentials));
-    });
-    yield* context.runtime.handleExtRequest(METHOD, Request, (request) => Effect.gen(function* () {
-      const activeSessionId = yield* context.activeSessionId;
-      if (!request.sessionId || request.sessionId !== activeSessionId) {
-        return yield* requestFailure("Credential request is not bound to the active ACP session");
-      }
-      if (request.providerId !== undefined && !isPiProviderId(request.providerId)) {
-        return yield* requestFailure("Credential provider ID is invalid");
-      }
-      const providerId = request.providerId;
-      if (providerId !== undefined && !providerIds.has(providerId)) {
-        return yield* requestFailure("Credential provider is not enabled for this instance");
-      }
-      const transactions = transactionsByInstance.get(instanceId);
+    const persist = (credentials: CredentialMap) =>
+      Effect.gen(function* () {
+        if (Object.keys(credentials).length === 0) yield* store.remove;
+        else yield* store.set(encodePiCredentialStore(credentials));
+      });
+    yield* context.runtime.handleExtRequest(METHOD, Request, (request) =>
+      Effect.gen(function* () {
+        const activeSessionId = yield* context.activeSessionId;
+        if (!request.sessionId || request.sessionId !== activeSessionId) {
+          return yield* requestFailure("Credential request is not bound to the active ACP session");
+        }
+        if (request.providerId !== undefined && !isPiProviderId(request.providerId)) {
+          return yield* requestFailure("Credential provider ID is invalid");
+        }
+        const providerId = request.providerId;
+        if (providerId !== undefined && !providerIds.has(providerId)) {
+          return yield* requestFailure("Credential provider is not enabled for this instance");
+        }
+        const transactions = transactionsByInstance.get(instanceId);
 
-      switch (request.operation) {
-        case "read": {
-          if (!providerId) return yield* requestFailure("Credential provider ID is required");
-          const credentials = yield* readMap;
-          return { credential: credentials[providerId] };
-        }
-        case "list": {
-          const credentials = yield* readMap;
-          return { credentials: Object.entries(credentials)
-            .filter(([id]) => providerIds.has(id))
-            .map(([id, credential]) => ({ providerId: id, type: credential.type })) };
-        }
-        case "beginModify": {
-          if (!providerId) return yield* requestFailure("Credential provider ID is required");
-          const release = yield* Effect.promise(() => acquireInstanceLock(instanceId));
-          const credentials = yield* readMap.pipe(Effect.onError(() => Effect.sync(release)));
-          const transactionId = randomUUID();
-          const records = transactionsByInstance.get(instanceId) ?? new Map<string, Transaction>();
-          const timer = setTimeout(() => finishTransaction(instanceId, transactionId), MAX_TRANSACTION_MS);
-          timer.unref();
-          records.set(transactionId, { id: transactionId, threadId: context.threadId, sessionId: request.sessionId, providerId, timer, release });
-          transactionsByInstance.set(instanceId, records);
-          return { transactionId, credential: credentials[providerId] };
-        }
-        case "commitModify": {
-          if (!request.transactionId) return yield* requestFailure("Credential transaction is required");
-          const transaction = transactions?.get(request.transactionId);
-          if (!transaction || transaction.threadId !== context.threadId || transaction.sessionId !== request.sessionId || transaction.providerId !== providerId) {
-            return yield* requestFailure("Credential transaction is invalid or expired");
-          }
-          if (request.credential !== undefined) {
-            if (!isPiCredential(request.credential) || new TextEncoder().encode(JSON.stringify(request.credential)).byteLength > MAX_CREDENTIAL_BYTES) {
-              return yield* requestFailure("Credential value is invalid");
-            }
-          }
-          return yield* Effect.gen(function* () {
+        switch (request.operation) {
+          case "read": {
+            if (!providerId) return yield* requestFailure("Credential provider ID is required");
             const credentials = yield* readMap;
-            if (request.credential !== undefined) credentials[transaction.providerId] = request.credential;
-            yield* persist(credentials);
-            const committed = credentials[transaction.providerId];
-            finishTransaction(instanceId, transaction.id);
-            return { credential: committed };
-          }).pipe(Effect.onError(() => Effect.sync(() => finishTransaction(instanceId, transaction.id))));
+            return { credential: credentials[providerId] };
+          }
+          case "list": {
+            const credentials = yield* readMap;
+            return {
+              credentials: Object.entries(credentials)
+                .filter(([id]) => providerIds.has(id))
+                .map(([id, credential]) => ({ providerId: id, type: credential.type })),
+            };
+          }
+          case "beginModify": {
+            if (!providerId) return yield* requestFailure("Credential provider ID is required");
+            const release = yield* Effect.promise(() => acquireInstanceLock(instanceId));
+            const credentials = yield* readMap.pipe(Effect.onError(() => Effect.sync(release)));
+            const transactionId = randomUUID();
+            const records =
+              transactionsByInstance.get(instanceId) ?? new Map<string, Transaction>();
+            const timer = setTimeout(
+              () => finishTransaction(instanceId, transactionId),
+              MAX_TRANSACTION_MS,
+            );
+            timer.unref();
+            records.set(transactionId, {
+              id: transactionId,
+              threadId: context.threadId,
+              sessionId: request.sessionId,
+              providerId,
+              timer,
+              release,
+            });
+            transactionsByInstance.set(instanceId, records);
+            return { transactionId, credential: credentials[providerId] };
+          }
+          case "commitModify": {
+            if (!request.transactionId)
+              return yield* requestFailure("Credential transaction is required");
+            const transaction = transactions?.get(request.transactionId);
+            if (
+              !transaction ||
+              transaction.threadId !== context.threadId ||
+              transaction.sessionId !== request.sessionId ||
+              transaction.providerId !== providerId
+            ) {
+              return yield* requestFailure("Credential transaction is invalid or expired");
+            }
+            return yield* Effect.gen(function* () {
+              if (request.credential !== undefined) {
+                if (
+                  !isPiCredential(request.credential) ||
+                  new TextEncoder().encode(JSON.stringify(request.credential)).byteLength >
+                    MAX_CREDENTIAL_BYTES
+                ) {
+                  return yield* requestFailure("Credential value is invalid");
+                }
+              }
+              const credentials = yield* readMap;
+              if (request.credential !== undefined)
+                credentials[transaction.providerId] = request.credential;
+              yield* persist(credentials);
+              const committed = credentials[transaction.providerId];
+              return { credential: committed };
+            }).pipe(
+              Effect.ensuring(Effect.sync(() => finishTransaction(instanceId, transaction.id))),
+            );
+          }
+          case "abortModify": {
+            if (!request.transactionId) return { ok: true };
+            const transaction = transactions?.get(request.transactionId);
+            if (
+              transaction?.threadId === context.threadId &&
+              transaction.sessionId === request.sessionId
+            )
+              finishTransaction(instanceId, transaction.id);
+            return { ok: true };
+          }
+          case "delete": {
+            if (!providerId) return yield* requestFailure("Credential provider ID is required");
+            const release = yield* Effect.promise(() => acquireInstanceLock(instanceId));
+            yield* readMap.pipe(
+              Effect.flatMap((credentials) => {
+                delete credentials[providerId];
+                return persist(credentials);
+              }),
+              Effect.ensuring(Effect.sync(release)),
+            );
+            return { ok: true };
+          }
         }
-        case "abortModify": {
-          if (!request.transactionId) return { ok: true };
-          const transaction = transactions?.get(request.transactionId);
-          if (transaction?.threadId === context.threadId && transaction.sessionId === request.sessionId) finishTransaction(instanceId, transaction.id);
-          return { ok: true };
-        }
-        case "delete": {
-          if (!providerId) return yield* requestFailure("Credential provider ID is required");
-          const release = yield* Effect.promise(() => acquireInstanceLock(instanceId));
-          yield* readMap.pipe(Effect.flatMap((credentials) => {
-            delete credentials[providerId];
-            return persist(credentials);
-          }), Effect.ensuring(Effect.sync(release)));
-          return { ok: true };
-        }
-      }
-    }).pipe(Effect.mapError((cause) =>
-      cause instanceof AcpErrors.AcpRequestError
-        ? cause
-        : AcpErrors.AcpRequestError.invalidRequest("Credential operation failed"),
-    )));
+      }).pipe(
+        Effect.mapError((cause) =>
+          cause instanceof AcpErrors.AcpRequestError
+            ? cause
+            : AcpErrors.AcpRequestError.invalidRequest("Credential operation failed"),
+        ),
+      ),
+    );
   });
 }
