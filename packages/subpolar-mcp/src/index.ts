@@ -7,6 +7,13 @@ import {
   type McpTool,
 } from "./subpolarAdapter.ts";
 import { isPrivateHost } from "./networkPolicy.ts";
+export { createProviderMcpAdmin } from "./admin.ts";
+export type {
+  ManagedMcpServerSummary,
+  ManagedMcpToolSummary,
+  ProviderMcpAdminOptions,
+  ProviderMcpAdminStore,
+} from "./admin.ts";
 
 const MAX_TIMEOUT_MS = 15_000;
 const MAX_RESPONSE_BYTES = 1_000_000;
@@ -28,7 +35,11 @@ export interface ProviderMcpRegistryOptions {
 
 export interface SubpolarMcpConnection {
   readonly listTools: () => Promise<McpTool[]>;
-  readonly callTool: (name: string, input: unknown, timeoutMs?: number) => ReturnType<McpClient["callTool"]>;
+  readonly callTool: (
+    name: string,
+    input: unknown,
+    timeoutMs?: number,
+  ) => ReturnType<McpClient["callTool"]>;
   readonly close: () => Promise<void>;
 }
 
@@ -76,11 +87,15 @@ function validatedConfig(
     url.hash ||
     !allowedHosts.includes(url.hostname.toLowerCase().replace(/\.$/, ""))
   ) {
-    throw new Error("MCP server URL must use HTTPS on an explicitly allowed public host without credentials or query parameters");
+    throw new Error(
+      "MCP server URL must use HTTPS on an explicitly allowed public host without credentials or query parameters",
+    );
   }
   if (
     input.timeoutMs !== undefined &&
-    (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 100 || input.timeoutMs > MAX_TIMEOUT_MS)
+    (!Number.isSafeInteger(input.timeoutMs) ||
+      input.timeoutMs < 100 ||
+      input.timeoutMs > MAX_TIMEOUT_MS)
   ) {
     throw new Error(`MCP server timeout must be between 100 and ${MAX_TIMEOUT_MS} milliseconds`);
   }
@@ -144,7 +159,10 @@ export function createProviderMcpRegistry(options: ProviderMcpRegistryOptions) {
     maxLineBytes: MAX_RESPONSE_BYTES,
     maxStderrBytes: 0,
   } satisfies Partial<McpLimits>;
-  const clients = new Map<string, { readonly adapter: ReturnType<typeof createSubpolarAdapter>; readonly client: McpClient }>();
+  const clients = new Map<
+    string,
+    { readonly adapter: ReturnType<typeof createSubpolarAdapter>; readonly client: McpClient }
+  >();
   let closed = false;
 
   return {

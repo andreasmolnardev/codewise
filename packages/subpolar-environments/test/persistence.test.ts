@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -116,6 +116,48 @@ test("serializes read-modify-write operations across independent store instances
   const registrations = await stores[0]!.loadAll();
   expect(registrations).toHaveLength(24);
   expect(new Set(registrations.map(({ environment }) => environment.id)).size).toBe(24);
+});
+
+test("rejects persisted registrations that do not match the managed environment schema", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-invalid-registration-"));
+  roots.push(root);
+  const file = path.join(root, "state", "environments.json");
+  const store = createFileEnvironmentRegistrationStore(file);
+  const environment: ManagedEnvironment = {
+    id: "env-1",
+    ownerId: "owner",
+    workspaceId: "workspace",
+    storageRoot: root,
+    worktreePath: path.join(root, "workspace"),
+    backendId: "fake",
+    resourceId: "resource-1",
+    status: "ready",
+    forwardedPorts: [3000],
+  };
+  await store.save(environment, "created", "updated");
+  const validDocument = JSON.parse(await readFile(file, "utf8")) as {
+    version: number;
+    registrations: Array<{
+      environment: Record<string, unknown>;
+      createdAt: string;
+      updatedAt: string;
+    }>;
+  };
+  expect(await store.loadAll()).toMatchObject([{ environment: { forwardedPorts: [3000] } }]);
+
+  const invalidCases: Array<[string, unknown]> = [
+    ["unknown lifecycle state", { status: "paused" }],
+    ["relative storage root", { storageRoot: "./workspace" }],
+    ["invalid forwarded port", { forwardedPorts: [0] }],
+    ["malformed forwarded ports", { forwardedPorts: "3000" }],
+    ["empty resource ID", { resourceId: " " }],
+  ];
+  for (const [label, change] of invalidCases) {
+    const corrupted = structuredClone(validDocument);
+    Object.assign(corrupted.registrations[0]!.environment, change);
+    await writeFile(file, JSON.stringify(corrupted));
+    await expect(store.loadAll(), label).rejects.toThrow("invalid or duplicate record");
+  }
 });
 
 test("atomically replaces an empty lock directory left by a crashed writer", async () => {

@@ -15,25 +15,59 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const ENVIRONMENT_STATUSES = new Set<EnvironmentStatus>([
+  "creating",
+  "starting",
+  "ready",
+  "stopping",
+  "stopped",
+  "failed",
+]);
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0 && !value.includes("\0");
+}
+
 function parseRegistration(value: unknown): EnvironmentRegistration | undefined {
   if (!isRecord(value) || !isRecord(value.environment)) return undefined;
   const environment = value.environment;
   const status = environment.status;
   if (
-    typeof environment.id !== "string" ||
-    typeof environment.ownerId !== "string" ||
-    typeof environment.workspaceId !== "string" ||
-    typeof environment.storageRoot !== "string" ||
-    typeof environment.worktreePath !== "string" ||
-    typeof environment.backendId !== "string" ||
-    typeof environment.resourceId !== "string" ||
-    !["creating", "starting", "ready", "stopping", "stopped", "failed"].includes(String(status)) ||
-    typeof value.createdAt !== "string" ||
-    typeof value.updatedAt !== "string"
+    !isNonEmptyString(environment.id) ||
+    !isNonEmptyString(environment.ownerId) ||
+    !isNonEmptyString(environment.workspaceId) ||
+    !isNonEmptyString(environment.storageRoot) ||
+    !path.isAbsolute(environment.storageRoot) ||
+    !isNonEmptyString(environment.worktreePath) ||
+    !path.isAbsolute(environment.worktreePath) ||
+    !isNonEmptyString(environment.backendId) ||
+    !isNonEmptyString(environment.resourceId) ||
+    typeof status !== "string" ||
+    !ENVIRONMENT_STATUSES.has(status as EnvironmentStatus) ||
+    (environment.forwardedPorts !== undefined &&
+      (!Array.isArray(environment.forwardedPorts) ||
+        environment.forwardedPorts.some(
+          (port) => !Number.isInteger(port) || (port as number) < 1 || (port as number) > 65535,
+        ))) ||
+    !isNonEmptyString(value.createdAt) ||
+    !isNonEmptyString(value.updatedAt)
   )
     return undefined;
+  const managedEnvironment: ManagedEnvironment = {
+    id: environment.id,
+    ownerId: environment.ownerId,
+    workspaceId: environment.workspaceId,
+    storageRoot: environment.storageRoot,
+    worktreePath: environment.worktreePath,
+    backendId: environment.backendId,
+    resourceId: environment.resourceId,
+    status: status as EnvironmentStatus,
+    ...(environment.forwardedPorts === undefined
+      ? {}
+      : { forwardedPorts: [...environment.forwardedPorts] as number[] }),
+  };
   return {
-    environment: environment as unknown as ManagedEnvironment & { status: EnvironmentStatus },
+    environment: managedEnvironment,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
   };
