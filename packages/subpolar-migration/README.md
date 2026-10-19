@@ -16,15 +16,26 @@ Supported inputs:
 - `.sessions.json`: counted for the report only; session IDs and titles are not
   copied.
 
-Run the package tests with `bun test packages/subpolar-migration/test`.
-Applications can call `createLegacyMigrationBundle` with paths selected by an
-operator and then `writeLegacyMigrationBundle` to write the result under a new,
-deterministic `subpolar-import-<hash>` directory. Repeating the same import is
-idempotent. A destination collision is rejected; nothing is overwritten. The
-staged bundle and its source hashes provide a review snapshot. Hashes cover only
-import-safe projections, not source secrets or conversation titles. Removing
-the staging directory reverses this operation because source and destination
-state are never changed.
+Run the package tests with `bun test packages/subpolar-migration/test`. To stage
+an import from the command line, provide the legacy files and an explicit
+output directory:
+
+```sh
+bun packages/subpolar-migration/src/cli.ts \
+  --projects /path/to/projects.json \
+  --tools /path/to/tools.json \
+  --settings /path/to/settings.json \
+  --output-root /path/to/migration-review
+```
+
+The CLI writes a new deterministic `subpolar-import-<hash>` directory. The
+library also exports `createLegacyMigrationBundle` and
+`writeLegacyMigrationBundle` for embedding in other operator tools. Repeating
+the same import is idempotent. A destination collision is rejected; nothing is
+overwritten. The staged bundle and its source hashes provide a review snapshot.
+Hashes cover only import-safe projections, not source secrets or conversation
+titles. Removing the staging directory reverses this operation because source
+and destination state are never changed.
 
 ## Safety and limitations
 

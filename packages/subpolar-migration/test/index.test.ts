@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
+import { runMigrationCli } from "../src/cli.ts";
 import { createLegacyMigrationBundle, writeLegacyMigrationBundle } from "../src/index.ts";
 
 async function fixture(files: Record<string, string>) {
@@ -11,6 +12,46 @@ async function fixture(files: Record<string, string>) {
 }
 
 describe("legacy migration staging", () => {
+  it("provides a standalone CLI that writes a redacted review bundle", async () => {
+    const root = await fixture({
+      "settings.json": JSON.stringify({
+        defaultModel: "provider/model",
+        gitCredentials: [{ token: "never-print-this" }],
+      }),
+    });
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    try {
+      expect(
+        await runMigrationCli(
+          ["--settings", join(root, "settings.json"), "--output-root", join(root, "out")],
+          { stdout: (text) => stdout.push(text), stderr: (text) => stderr.push(text) },
+        ),
+      ).toBe(0);
+      expect(JSON.parse(stdout[0]!)).toMatchObject({
+        ok: true,
+        imported: { runtimeSettings: 1 },
+        skipped: { credentials: 1 },
+      });
+      expect(stdout.join("")).not.toContain("never-print-this");
+      expect(stderr).toEqual([]);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires an explicit destination and at least one input", async () => {
+    const stderr: string[] = [];
+    expect(await runMigrationCli([], { stderr: (text) => stderr.push(text) })).toBe(2);
+    expect(stderr).toEqual(["--output-root is required\n"]);
+  });
+
+  it("prints help without inspecting legacy files", async () => {
+    const stdout: string[] = [];
+    expect(await runMigrationCli(["--help"], { stdout: (text) => stdout.push(text) })).toBe(0);
+    expect(stdout.join("")).toContain("--output-root DIR");
+  });
+
   it("normalizes known config, skips secrets and sessions, and is repeatable", async () => {
     const root = await fixture({
       "projects.json": JSON.stringify({ apps: "./apps" }),
