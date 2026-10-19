@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import { assert, it, vi } from "@effect/vitest";
-import { ProjectId } from "@t3tools/contracts";
+import { ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -9,6 +10,7 @@ import * as Option from "effect/Option";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectService from "./ProjectService.ts";
+import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as ProjectSetupScriptRunner from "./ProjectSetupScriptRunner.ts";
 
 it.effect("resolves setup scripts through the standalone project service", () => {
@@ -74,6 +76,9 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       Layer.mergeAll(
         Layer.mock(ProjectService.ProjectService)({
           getById: () => Effect.succeed(Option.some(project)),
+        }),
+        Layer.mock(ProviderSessionRuntime.ProviderSessionRuntimeRepository)({
+          getByThreadId: () => Effect.succeed(Option.none()),
         }),
         Layer.mock(TerminalManager.TerminalManager)({ open, write, subscribe, closeIdle }),
         ServerSettings.layerTest(),
@@ -175,5 +180,175 @@ it.effect("resolves setup scripts through the standalone project service", () =>
       threadId: "thread-1",
       terminalId: observedTerminalId,
     });
-  }).pipe(Effect.provide(layer));
+  }).pipe(
+    Effect.provide(layer),
+    Effect.provideService(HostProcess.Environment, {}),
+  );
+});
+
+it.effect("routes setup terminals through the allowlisted managed provider instance", () => {
+  const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
+    Effect.succeed({
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      cwd: input.cwd,
+      worktreePath: input.worktreePath ?? null,
+      status: "running" as const,
+      pid: 123,
+      history: "",
+      exitCode: null,
+      exitSignal: null,
+      label: "Shell",
+      updatedAt: "2026-06-20T00:00:00.000Z",
+    }),
+  );
+  const projectId = ProjectId.make("project:managed-setup-runner");
+  const project = {
+    id: projectId,
+    title: "Project",
+    workspaceRoot: "/repo",
+    repositoryIdentity: null,
+    faviconPath: null,
+    defaultModelSelection: null,
+    scripts: [
+      {
+        id: "setup",
+        name: "Setup",
+        command: "vp install",
+        icon: "configure" as const,
+        runOnWorktreeCreate: true,
+      },
+    ],
+    createdAt: "2026-06-20T00:00:00.000Z",
+    updatedAt: "2026-06-20T00:00:00.000Z",
+    deletedAt: null,
+  };
+  const managedLayer = ProjectSetupScriptRunner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () => Effect.succeed(Option.some(project)),
+        }),
+        Layer.mock(ProviderSessionRuntime.ProviderSessionRuntimeRepository)({
+          getByThreadId: () => Effect.succeed(Option.none()),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          open,
+          write: () => Effect.void,
+          subscribe: () => Effect.succeed(() => undefined),
+          closeIdle: () => Effect.void,
+        }),
+        ServerSettings.layerTest(),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    yield* runner.runForThread({
+      threadId: "thread-managed-setup",
+      providerInstanceId: "subpolar_instance",
+      projectId,
+      worktreePath: "/repo-worktree",
+      project: { ...project, scripts: project.scripts },
+    });
+    assert.equal(open.mock.calls[0]?.[0].providerInstanceId, "subpolar_instance");
+    assert.equal(open.mock.calls[0]?.[0].cwd, "/repo-worktree");
+  }).pipe(
+    Effect.provide(managedLayer),
+    Effect.provideService(HostProcess.Environment, {
+      SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS: "subpolar_instance",
+    }),
+  );
+});
+
+it.effect("uses the persisted managed Subpolar session for later setup scripts", () => {
+  const open = vi.fn((input: Parameters<TerminalManager.TerminalManager["Service"]["open"]>[0]) =>
+    Effect.succeed({
+      threadId: input.threadId,
+      terminalId: input.terminalId,
+      cwd: input.cwd,
+      worktreePath: input.worktreePath ?? null,
+      status: "running" as const,
+      pid: 123,
+      history: "",
+      exitCode: null,
+      exitSignal: null,
+      label: "Shell",
+      updatedAt: "2026-06-20T00:00:00.000Z",
+    }),
+  );
+  const projectId = ProjectId.make("project:managed-settle-runner");
+  const project = {
+    id: projectId,
+    title: "Project",
+    workspaceRoot: "/repo",
+    repositoryIdentity: null,
+    faviconPath: null,
+    defaultModelSelection: null,
+    scripts: [
+      {
+        id: "clean",
+        name: "Clean",
+        command: "cargo clean",
+        icon: "build" as const,
+        runOnSettle: true,
+      },
+    ],
+    createdAt: "2026-06-20T00:00:00.000Z",
+    updatedAt: "2026-06-20T00:00:00.000Z",
+    deletedAt: null,
+  };
+  const providerInstanceId = ProviderInstanceId.make("subpolar_instance");
+  const layer = ProjectSetupScriptRunner.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () => Effect.succeed(Option.some(project)),
+        }),
+        Layer.mock(ProviderSessionRuntime.ProviderSessionRuntimeRepository)({
+          getByThreadId: () =>
+            Effect.succeed(
+              Option.some({
+                threadId: "thread-managed-settle",
+                providerName: "subpolar",
+                providerInstanceId,
+                adapterKey: "subpolar/pi-acp",
+                runtimeMode: "managed",
+                status: "stopped",
+                lastSeenAt: "2026-06-20T00:00:00.000Z",
+                resumeCursor: null,
+                runtimePayload: null,
+              }),
+            ),
+        }),
+        Layer.mock(TerminalManager.TerminalManager)({
+          open,
+          write: () => Effect.void,
+          subscribe: () => Effect.succeed(() => undefined),
+          closeIdle: () => Effect.void,
+        }),
+        ServerSettings.layerTest(),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const runner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
+    yield* runner.runForThread({
+      threadId: "thread-managed-settle",
+      projectId,
+      worktreePath: "/repo-worktree",
+      trigger: "settle",
+      project,
+    });
+    assert.equal(open.mock.calls[0]?.[0].providerInstanceId, providerInstanceId);
+  }).pipe(
+    Effect.provide(layer),
+    Effect.provideService(HostProcess.Environment, {
+      SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS: "subpolar_instance",
+    }),
+  );
 });

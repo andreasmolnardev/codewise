@@ -71,6 +71,7 @@ class FakeDockerClient implements DockerClient {
   readonly removeVolumeCalls: string[] = [];
   readonly processCalls: Array<{ id: string; request: DockerContainerProcessRequest }> = [];
   readonly processExitCodes: number[] = [];
+  readonly processCancellationResults: boolean[] = [];
   readonly postCreateRuns: string[] = [];
   private readonly completedPostCreateMarkers = new Set<string>();
   readonly managedSessionCalls: Array<{ id: string; request: DockerContainerManagedSessionRequest }> = [];
@@ -186,7 +187,11 @@ class FakeDockerClient implements DockerClient {
         this.completedPostCreateMarkers.add(marker);
       }
     }
-    return { processId: "exec-1", exitCode, cancelled: request.signal?.aborted ?? false };
+    return {
+      processId: "exec-1",
+      exitCode,
+      cancelled: this.processCancellationResults.shift() ?? request.signal?.aborted ?? false,
+    };
   }
 
   async startManagedSessionContainer(id: string, request: DockerContainerManagedSessionRequest): Promise<EnvironmentManagedProcessSession> {
@@ -400,6 +405,20 @@ describe("Docker environment backend", () => {
     });
   });
 
+  test("discovers the root-level Dev Container configuration", async () => {
+    const { client, manager, request, identity } = await fixture();
+    await Bun.write(path.join(identity.worktreePath, ".devcontainer.json"), `{
+      // Repositories may keep their configuration at the workspace root.
+      "image": "registry.example/root-worker:latest",
+    }`);
+
+    await manager.ensure(request);
+
+    expect(client.createCalls[0]?.image).toBe("registry.example/root-worker:latest");
+    expect(client.createCalls[0]?.networkMode).toBe("none");
+    expect(client.createCalls[0]?.mounts[0]?.target).toBe("/workspaces/repo/worktree-a");
+  });
+
   test("runs postCreate once per persistent marker and postStart on each worker start", async () => {
     const { client, manager, request, identity } = await fixture();
     await mkdir(path.join(identity.worktreePath, ".devcontainer"), { recursive: true });
@@ -522,6 +541,22 @@ describe("Docker environment backend", () => {
       postStartCommand: "./start.sh",
     }));
     client.processExitCodes.push(12);
+    const created = await backend.create(identity);
+
+    await expect(backend.start(created)).rejects.toMatchObject({ code: "DEV_CONTAINER_SETUP_FAILED" });
+    expect(client.stopCalls).toEqual([created.resourceId]);
+    expect(client.containers.get(client.createCalls[0]!.name)?.state).toBe("exited");
+  });
+
+  test("stops and fails closed when postCreate is cancelled", async () => {
+    const { client, backend, identity } = await fixture();
+    await mkdir(path.join(identity.worktreePath, ".devcontainer"), { recursive: true });
+    await Bun.write(path.join(identity.worktreePath, ".devcontainer", "devcontainer.json"), JSON.stringify({
+      image: "project:latest",
+      postCreateCommand: ["./setup.sh"],
+    }));
+    client.processExitCodes.push(0);
+    client.processCancellationResults.push(true);
     const created = await backend.create(identity);
 
     await expect(backend.start(created)).rejects.toMatchObject({ code: "DEV_CONTAINER_SETUP_FAILED" });
@@ -804,6 +839,45 @@ describe("Docker environment backend", () => {
     await manager.remove(request);
     expect(client.networks.has(databaseOptions.networkMode)).toBe(false);
     expect(client.volumes.has(databaseOptions.mounts[0]!.source)).toBe(false);
+  });
+
+  test("stops the PostgreSQL sidecar when Compose app setup fails", async () => {
+    const { client, backend, identity } = await fixture({ allowDevContainerCompose: true });
+    const directory = path.join(identity.worktreePath, ".devcontainer");
+    await mkdir(directory, { recursive: true });
+    await Promise.all([
+      Bun.write(path.join(directory, "devcontainer.json"), JSON.stringify({
+        dockerComposeFile: "compose.yaml",
+        service: "app",
+        postCreateCommand: "./setup.sh",
+      })),
+      Bun.write(path.join(directory, "compose.yaml"), [
+        "services:",
+        "  app:",
+        "    image: subpolar/worker:1.0",
+        "    depends_on:",
+        "      - db",
+        "  db:",
+        "    image: postgres:16",
+        "    environment:",
+        "      POSTGRES_PASSWORD: local-test-password",
+      ].join("\n")),
+    ]);
+    client.processExitCodes.push(9);
+
+    const created = await backend.create(identity);
+    const database = client.createCalls.find((call) => call.name.endsWith("-db"))!;
+    const worker = client.createCalls.find((call) => call.name === `subpolar-${identity.id}`)!;
+
+    await expect(backend.start(created)).rejects.toMatchObject({ code: "DEV_CONTAINER_SETUP_FAILED" });
+
+    expect(client.stopCalls).toEqual([
+      client.containers.get(database.name)?.id,
+      client.containers.get(worker.name)?.id,
+    ]);
+    expect(client.containers.get(database.name)?.state).toBe("exited");
+    expect(client.containers.get(worker.name)?.state).toBe("exited");
+    expect(client.networks.has(database.networkMode)).toBe(true);
   });
 
   test("rejects Compose by default before creating Docker resources", async () => {

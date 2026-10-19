@@ -298,14 +298,19 @@ export function createEnvironmentManager(
     return { ...values, id: stableId(values) };
   };
 
-  const withIdentityLock = <A>(id: string, operation: () => Promise<A>): Promise<A> => {
-    const prior = operations.get(id);
-    if (prior) return prior as Promise<A>;
-    const pending = operation().finally(() => {
-      if (operations.get(id) === pending) operations.delete(id);
-    });
-    operations.set(id, pending);
-    return pending;
+  const withIdentityLock = async <A>(id: string, operation: () => Promise<A>): Promise<A> => {
+    const prior = operations.get(id) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = prior.then(() => gate);
+    operations.set(id, queued);
+    await prior;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (operations.get(id) === queued) operations.delete(id);
+    }
   };
 
   const backendCall = async <A>(operation: string, call: () => Promise<A>): Promise<A> => {
@@ -857,7 +862,7 @@ export function createEnvironmentManager(
   const reconcile: EnvironmentManager["reconcile"] = async () => {
     if (!registrations) return [];
     const saved = await registrations.loadAll();
-    return Promise.all(saved.map(async ({ environment }) => {
+    return Promise.all(saved.map(async ({ environment }) => withIdentityLock(environment.id, async () => {
       try {
         let currentIdentity: EnvironmentIdentity;
         try {
@@ -888,7 +893,7 @@ export function createEnvironmentManager(
             : new EnvironmentManagerError("BACKEND_FAILURE", "Environment reconciliation failed", { cause: error }),
         };
       }
-    }));
+    })));
   };
 
   return { identity, ensure, start, stop, restart, remove, execute, startInteractive, writeInteractive, resizeInteractive, attachInteractiveOutput, terminateInteractive, closeInteractiveSessions, startManagedSession, startPortTunnel, writeManagedSession, attachManagedSessionOutput, terminateManagedSession, closeManagedSessions, reconcile, list, inspect: inspectRegistered, rebuild };

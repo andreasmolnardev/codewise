@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ServerSettings from "../serverSettings.ts";
+import * as ProviderSessionRuntime from "../persistence/ProviderSessionRuntime.ts";
 import * as TerminalManager from "../terminal/Manager.ts";
 import * as ProjectService from "./ProjectService.ts";
 
@@ -53,6 +54,7 @@ export type ProjectSetupScriptRunnerResult =
 
 export interface ProjectSetupScriptRunnerInput {
   readonly threadId: string;
+  readonly providerInstanceId?: string;
   readonly projectId?: string;
   readonly projectCwd?: string;
   readonly worktreePath: string;
@@ -183,11 +185,19 @@ function wrapCommandForCompletion(
 export const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
   const terminalManager = yield* TerminalManager.TerminalManager;
+  const providerSessionRuntimes = yield* ProviderSessionRuntime.ProviderSessionRuntimeRepository;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
+  const hostEnvironment = yield* HostProcess.Environment;
+  const managedProviderInstanceIds = new Set(
+    (hostEnvironment.SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
   const completionShell = resolveCompletionShell(
     yield* HostProcess.Platform,
-    yield* HostProcess.Environment,
+    hostEnvironment,
   );
 
   const observeTerminalCompletion = (input: {
@@ -362,6 +372,26 @@ export const make = Effect.gen(function* () {
       // as Vite+ wait for terminal replies that nobody can send at that point.
       COLORTERM: "",
     };
+    const requestedProviderInstanceId =
+      input.providerInstanceId ??
+      (yield* providerSessionRuntimes
+        .getByThreadId({ threadId: input.threadId })
+        .pipe(
+          Effect.map(
+            Option.match({
+              onNone: () => undefined,
+              onSome: (runtime) =>
+                runtime.providerName === "subpolar" && runtime.runtimeMode === "managed"
+                  ? runtime.providerInstanceId ?? undefined
+                  : undefined,
+            }),
+          ),
+          Effect.orElseSucceed(() => undefined),
+        ));
+    const managedProviderInstanceId =
+      requestedProviderInstanceId && managedProviderInstanceIds.has(requestedProviderInstanceId)
+        ? requestedProviderInstanceId
+        : undefined;
     const observe = input.observeCompletion;
     const completionToken = observe
       ? (yield* crypto.randomUUIDv4().pipe(Effect.orDie)).replaceAll("-", "")
@@ -382,6 +412,7 @@ export const make = Effect.gen(function* () {
         cwd,
         worktreePath: input.worktreePath,
         env: { ...env, NO_COLOR: "1", FORCE_COLOR: "0" },
+        ...(managedProviderInstanceId ? { providerInstanceId: managedProviderInstanceId } : {}),
       })
       .pipe(
         Effect.mapError(

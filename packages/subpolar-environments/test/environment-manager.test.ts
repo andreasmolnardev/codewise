@@ -405,4 +405,45 @@ describe("environment lifecycle coordinator", () => {
     expect(result?.error).toMatchObject({ code: "OWNERSHIP_MISMATCH", message: expect.stringContaining("stale") });
     expect(backend.calls).not.toContain("inspect");
   });
+
+  test("serializes reconciliation with lifecycle changes for the same environment", async () => {
+    const { request } = await fixture();
+    const backend = new FakeBackend();
+    const registrations = {
+      records: new Map<string, { environment: ManagedEnvironment; createdAt: string; updatedAt: string }>(),
+      async loadAll() { return [...this.records.values()]; },
+      async save(environment: ManagedEnvironment, createdAt: string, updatedAt: string) {
+        this.records.set(environment.id, { environment, createdAt, updatedAt });
+      },
+      async remove(id: string) { this.records.delete(id); },
+    };
+    const manager = createEnvironmentManager(backend, registrations);
+    const ready = await manager.ensure(request);
+
+    let inspected!: () => void;
+    const inspectEntered = new Promise<void>((resolve) => { inspected = resolve; });
+    let continueInspection!: () => void;
+    const inspectionGate = new Promise<void>((resolve) => { continueInspection = resolve; });
+    const inspect = backend.inspect.bind(backend);
+    let pauseNextInspection = true;
+    backend.inspect = async (identity) => {
+      const snapshot = await inspect(identity);
+      if (pauseNextInspection) {
+        pauseNextInspection = false;
+        inspected();
+        await inspectionGate;
+      }
+      return snapshot;
+    };
+
+    const reconciliation = manager.reconcile();
+    await inspectEntered;
+    const stopping = manager.stop(request);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    continueInspection();
+    await Promise.all([reconciliation, stopping]);
+
+    expect(registrations.records.get(ready.id)?.environment.status).toBe("stopped");
+    expect(backend.calls.filter((call) => call === "stop")).toHaveLength(1);
+  });
 });
