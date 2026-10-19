@@ -48,6 +48,7 @@ import { resolvePreviewViewport } from "@t3tools/shared/previewViewport";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
+import * as Path from "effect/Path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import { constVoid } from "effect/Function";
@@ -74,12 +75,17 @@ import { PENDING_ATTACHMENT_THREAD_SEGMENT } from "../attachmentStore.ts";
 import * as ServerConfig from "../config.ts";
 import { resolveRootCliCommand } from "../cli/invocation.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import { createSubpolarManagerAccess } from "../environment/SubpolarManagerAccess.ts";
 import * as PreviewAutomationBroker from "../mcp/PreviewAutomationBroker.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as TerminalManager from "../terminal/Manager.ts";
+import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as DesktopBrowserChannel from "./DesktopBrowserChannel.ts";
 import * as PreviewManager from "./Manager.ts";
 import * as ServerBrowserPage from "./ServerBrowserPage.ts";
 import * as PreviewBrowser from "./PreviewBrowser.ts";
 import * as PreviewBrowserHost from "./PreviewBrowserHost.ts";
+import { makeSubpolarPreviewRouting } from "./SubpolarPreviewRouting.ts";
 import { presentAsChrome, ServerBrowserContexts } from "./ServerBrowserContexts.ts";
 import { BrowserControlInterrupted, SessionControl } from "./SessionControl.ts";
 import { installPdfDocumentNavigation, isPdfAssetUrl } from "./PdfDocumentNavigation.ts";
@@ -460,11 +466,57 @@ const make = Effect.gen(function* () {
   const manager = yield* PreviewManager.PreviewManager;
   const broker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
   const environment = yield* ServerEnvironment.ServerEnvironment;
+  const threadManagement = yield* Effect.serviceOption(
+    ThreadManagementService.ThreadManagementService,
+  );
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const path = yield* Effect.serviceOption(Path.Path);
   const previewBrowser = yield* PreviewBrowser.PreviewBrowser;
   const desktopChannel = yield* DesktopBrowserChannel.DesktopBrowserChannel;
   const runFork = Effect.runForkWith(yield* Effect.context<never>());
   const launchServices = yield* Effect.context<ChildProcessSpawner.ChildProcessSpawner>();
   const setupCommand = yield* resolveRootCliCommand(PreviewBrowserHost.SETUP_SUBCOMMAND);
+
+  const managedProviderInstanceIds = new Set(
+    (process.env.SUBPOLAR_MANAGED_PROVIDER_INSTANCE_IDS ?? "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean),
+  );
+  const resolveSubpolarPreviewTarget = async (threadId: string) => {
+    if (Option.isNone(threadManagement) || Option.isNone(serverSettings) || Option.isNone(path)) {
+      throw new Error("Managed Subpolar preview services are unavailable.");
+    }
+    const shell = await Effect.runPromise(
+      threadManagement.value.getThreadShell(ThreadId.make(threadId)),
+    );
+    if (!shell) throw new Error("Preview thread no longer exists.");
+    const providerInstanceId = shell.providerInstanceId;
+    if (!managedProviderInstanceIds.has(providerInstanceId)) return null;
+    const worktreePath = shell.worktreePath;
+    if (!worktreePath) throw new Error("Managed Subpolar preview requires a bound T3 worktree.");
+    const resolvedEnvironment = await Effect.runPromise(
+      TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        serverSettings: serverSettings.value,
+        path: path.value,
+        rawProviderInstanceId: providerInstanceId,
+        env: undefined,
+      }),
+    );
+    const access = createSubpolarManagerAccess(
+      {
+        baseUrl: process.env.SUBPOLAR_MANAGER_URL?.trim() ?? "",
+        storageRoot: process.env.SUBPOLAR_STORAGE_ROOT?.trim() ?? "",
+        allowPrivateHttp: process.env.SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP === "true",
+      },
+      {
+        providerInstanceId,
+        instanceToken: resolvedEnvironment.SUBPOLAR_MANAGER_INSTANCE_TOKEN,
+        worktreePath,
+      },
+    );
+    return access;
+  };
 
   const tabs = new Map<string, ServerTab>();
   const pendingTabs = new Map<string, Promise<ServerTab>>();
@@ -736,6 +788,27 @@ const make = Effect.gen(function* () {
     if (adopted?.page.isClosed()) throw new Error("The popup closed before it opened.");
     if (!desktop) await prepareContext(context);
     const page = adopted?.page ?? desktop?.page ?? (await context.newPage());
+    const subpolarPreviewRouting =
+      !desktop && snapshot.runtime === "server" && managedProviderInstanceIds.size > 0
+        ? makeSubpolarPreviewRouting(resolveSubpolarPreviewTarget)
+        : undefined;
+    if (subpolarPreviewRouting) {
+      const routeManagedPreviewRequest = async (route: import("playwright-core").Route) => {
+        try {
+          const rewritten = await subpolarPreviewRouting.rewrite(
+            snapshot.threadId,
+            route.request().url(),
+          );
+          if (rewritten === null) await route.continue();
+          else await route.continue({ url: rewritten });
+        } catch {
+          // A managed preview must never silently reach the gateway's localhost.
+          await route.abort("failed").catch(constVoid);
+        }
+      };
+      await page.route("**/*", routeManagedPreviewRequest);
+      page.once("close", () => void subpolarPreviewRouting.close());
+    }
     const cdp = await context.newCDPSession(page);
     await installPdfDocumentNavigation(cdp);
     // The desktop's page is already a normal browser. A popup's first request

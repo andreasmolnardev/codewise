@@ -11,6 +11,7 @@ import {
   type PiSdkModule,
   type PiSessionManager,
 } from "@subpolar/runtime-pi";
+import * as bundledPiSdk from "../../subpolar-core-pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/index.js";
 
 import { makeInMemoryStdio } from "../../effect-acp/src/_internal/stdio.ts";
 import { layer } from "../src/index.ts";
@@ -47,6 +48,12 @@ const initialize = request(1, "initialize", {
   info: { name: "subpolar-acp-test", version: "1.0" },
   capabilities: {},
 });
+
+interface LocalMockModelRuntime {
+  registerProvider(providerId: string, config: Record<string, unknown>): void;
+  getModel(providerId: string, modelId: string): unknown;
+  setRuntimeApiKey(providerId: string, apiKey: string): Promise<void>;
+}
 
 function makeMockPiSdk(appendedByTurn: unknown[][], prompts: string[]): PiSdkModule {
   let nextSessionId = 0;
@@ -251,6 +258,131 @@ it.effect(
       yield* Scope.close(scope, Exit.void);
     }),
 );
+
+it.effect("completes an ACP turn with the real Pi SDK and a local mock model provider", () =>
+  Effect.gen(function* () {
+    const { stdio, input, output } = yield* makeInMemoryStdio();
+    const scope = yield* Scope.make();
+    const sdk = bundledPiSdk as unknown as PiSdkModule;
+    const calls: Array<{ model: string; prompt: string }> = [];
+    const configured = yield* Effect.promise(async () => {
+      if (!sdk.ModelRuntime) throw new Error("The installed Pi SDK has no ModelRuntime");
+      const runtime = (await sdk.ModelRuntime.create({
+        modelsPath: null,
+        allowModelNetwork: false,
+        refreshOnCreate: false,
+      })) as LocalMockModelRuntime;
+      runtime.registerProvider("subpolar-acp-test", {
+        name: "Subpolar ACP local test",
+        baseUrl: "http://127.0.0.1/mock",
+        api: "openai-completions",
+        models: [
+          {
+            id: "mock-model",
+            name: "Mock model",
+            api: "openai-completions",
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            reasoning: false,
+            contextWindow: 4_096,
+            maxTokens: 256,
+          },
+        ],
+        streamSimple(model: { id: string }, context: { messages: unknown[] }) {
+          const userMessage = context.messages.at(-1) as
+            | { content?: Array<{ type?: string; text?: string }> }
+            | undefined;
+          const prompt =
+            userMessage?.content
+              ?.filter((block) => block.type === "text")
+              .map((block) => block.text ?? "")
+              .join("") ?? "";
+          calls.push({ model: model.id, prompt });
+          const text = `local mock answer: ${prompt}`;
+          const message = {
+            role: "assistant",
+            content: [{ type: "text", text }],
+            api: "openai-completions",
+            provider: "subpolar-acp-test",
+            model: model.id,
+            usage: {
+              input: 1,
+              output: 1,
+              cacheRead: 0,
+              cacheWrite: 0,
+              totalTokens: 2,
+              cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+            },
+            stopReason: "stop",
+            timestamp: Date.now(),
+          };
+          const events = async function* () {
+            yield { type: "start", partial: message };
+            yield { type: "text_start", contentIndex: 0, partial: message };
+            yield { type: "text_delta", contentIndex: 0, delta: text, partial: message };
+            yield { type: "text_end", contentIndex: 0, content: text, partial: message };
+            yield { type: "done", message };
+          };
+          return Object.assign(events(), { result: async () => message });
+        },
+      });
+      await runtime.setRuntimeApiKey("subpolar-acp-test", "local-only-test-key");
+      const model = runtime.getModel("subpolar-acp-test", "mock-model");
+      if (!model) throw new Error("The local mock Pi model was not registered");
+      return { runtime, model };
+    });
+
+    yield* Layer.buildWithScope(
+      layer(stdio, {
+        loadPiSdk: async () => sdk,
+        piConfig: { model: configured.model, modelRuntime: configured.runtime },
+      }),
+      scope,
+    );
+
+    yield* send(input, initialize);
+    const initialized = yield* readResponse(output, 1);
+    assert.equal((initialized.result as { info: { name: string } }).info.name, "subpolar");
+    yield* send(input, request(2, "session/new", { cwd: "/tmp/subpolar-acp-test" }));
+    const created = yield* readResponse(output, 2);
+    const sessionId = (created.result as { sessionId: string }).sessionId;
+    yield* send(
+      input,
+      request(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "say hello" }],
+      }),
+    );
+
+    let responseReceived = false;
+    let turnCompleted = false;
+    let answerReceived = false;
+    while (!responseReceived || !turnCompleted) {
+      const message = yield* readJsonLine(output);
+      if (message.id === 3) responseReceived = true;
+      if (message.method !== "session/update") continue;
+      const update = (message.params as { update?: Record<string, unknown> }).update;
+      if (!update) continue;
+      const answerContent = update.content as
+        | { text?: string }
+        | Array<{ type?: string; text?: string }>
+        | undefined;
+      answerReceived ||=
+        (update.sessionUpdate === "agent_message_chunk" &&
+          !Array.isArray(answerContent) &&
+          answerContent?.text === "local mock answer: say hello") ||
+        (update.sessionUpdate === "agent_message" &&
+          Array.isArray(answerContent) &&
+          answerContent.some((block) => block.text === "local mock answer: say hello"));
+      turnCompleted ||= update.sessionUpdate === "state_update" && update.state === "idle";
+      if (turnCompleted) assert.equal(update.stopReason, "end_turn");
+    }
+    assert.isTrue(answerReceived);
+    assert.deepEqual(calls, [{ model: "mock-model", prompt: "say hello" }]);
+    yield* Scope.close(scope, Exit.void);
+  }),
+);
+
 it.effect("forwards ACP cancellation to the transient Pi executor", () =>
   Effect.gen(function* () {
     const { stdio, input, output } = yield* makeInMemoryStdio();
@@ -264,18 +396,18 @@ it.effect("forwards ACP cancellation to the transient Pi executor", () =>
       layer(stdio, {
         executorFactory: async () => ({
           execute: (execution) =>
-            new Promise((resolve) => {
+            new Promise((_, reject) => {
               markStarted();
               if (execution.signal?.aborted) {
                 aborted = true;
-                resolve("cancelled");
+                reject(new Error("cancelled"));
                 return;
               }
               execution.signal?.addEventListener(
                 "abort",
                 () => {
                   aborted = true;
-                  resolve("cancelled");
+                  reject(new Error("cancelled"));
                 },
                 { once: true },
               );
@@ -297,17 +429,18 @@ it.effect("forwards ACP cancellation to the transient Pi executor", () =>
         prompt: [{ type: "text", text: "wait" }],
       }),
     );
-    yield* readResponse(output, 3);
     yield* Effect.promise(() => executorStarted);
     yield* send(input, { jsonrpc: "2.0", method: "session/cancel", params: { sessionId } });
 
     let cancelled = false;
-    while (!cancelled) {
+    let responseReceived = false;
+    while (!cancelled || !responseReceived) {
       const message = yield* readJsonLine(output);
+      if (message.id === 3) responseReceived = true;
       const update = (
         message.params as { update?: { state?: string; stopReason?: string } } | undefined
       )?.update;
-      cancelled = update?.state === "idle" && update.stopReason === "cancelled";
+      cancelled ||= update?.state === "idle" && update.stopReason === "cancelled";
     }
     assert.equal(aborted, true);
     yield* Scope.close(scope, Exit.void);
@@ -621,7 +754,11 @@ it.effect(
         if (message.method === "session/request_permission") permission = message;
       }
       assert.equal(
-        (permission.params as { toolCall: { name: string } }).toolCall.name,
+        (
+          permission.params as {
+            subject: { type: "tool_call"; toolCall: { name: string } };
+          }
+        ).subject.toolCall.name,
         "mcp/issues/search",
       );
       yield* send(input, {

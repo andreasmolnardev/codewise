@@ -12,7 +12,7 @@ From the repository root, create a persistent workspace directory and a
 ```dotenv
 SUBPOLAR_WORKSPACES_HOST_PATH=/absolute/path/to/persistent/workspaces
 SUBPOLAR_MANAGER_TOKEN=<random secret with at least 32 characters>
-SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","stdio","execute"]}}
+SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","pty","stdio","tcp","execute"]}}
 # Optional: match the host group that can access /var/run/docker.sock.
 SUBPOLAR_DOCKER_GID=999
 # Optional: comma-separated exact provider instance IDs allowed to use managed Pi.
@@ -30,6 +30,35 @@ SUBPOLAR_DEFAULT_DEVCONTAINER_CONFIG=
 # Optional and security-sensitive; Compose Dev Containers are disabled by default.
 SUBPOLAR_ENABLE_DEVCONTAINER_COMPOSE=false
 ```
+
+## Provider-scoped MCP servers
+
+The server reads optional MCP server definitions from
+`<T3 state directory>/subpolar-mcp.json`. Keep this file private to the T3
+service account. Its `providers` keys are ACP provider instance IDs; header
+values reference environment variable names configured on that provider
+instance, so secret values stay out of the file:
+
+```json
+{
+  "version": 1,
+  "providers": {
+    "subpolar_team_a": [
+      {
+        "id": "issues",
+        "url": "https://mcp.example.com/mcp",
+        "headers": {
+          "Authorization": { "env": "ISSUES_MCP_TOKEN" }
+        }
+      }
+    ]
+  }
+}
+```
+
+Use HTTPS URLs without embedded credentials, query parameters, or fragments.
+Each server's host is allowlisted for that provider instance only. Restart the
+managed ACP thread after changing this file.
 
 The workspace path must be absolute and writable by UID 1000 (`codewise`) in
 the gateway container. On Linux, make sure the host directory grants that

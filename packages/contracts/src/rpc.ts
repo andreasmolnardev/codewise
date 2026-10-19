@@ -160,13 +160,7 @@ import {
   ProviderUploadFeedbackInput,
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
-import {
-  ProviderInstanceId,
-  ProviderInstanceMutation,
-  ProviderInstanceMcpAdminInput,
-  ProviderInstanceMcpAdminResult,
-  ProviderInstanceMcpAdminError,
-} from "./providerInstance.ts";
+import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
 import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
 import {
   PullRequestActionInput,
@@ -482,7 +476,6 @@ export const WS_METHODS = {
   serverGetDatabaseStorage: "server.getDatabaseStorage",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
-  serverManageProviderMcp: "server.manageProviderMcp",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverSearchAcpRegistry: "server.searchAcpRegistry",
   serverPrepareAcpRegistryAgent: "server.prepareAcpRegistryAgent",
@@ -766,12 +759,6 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
   }),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
-});
-
-const WsServerManageProviderMcpRpc = Rpc.make(WS_METHODS.serverManageProviderMcp, {
-  payload: ProviderInstanceMcpAdminInput,
-  success: ProviderInstanceMcpAdminResult,
-  error: Schema.Union([ProviderInstanceMcpAdminError, EnvironmentAuthorizationError]),
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -1895,7 +1882,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerGetDatabaseStorageRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
-  WsServerManageProviderMcpRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerSearchAcpRegistryRpc,
   WsServerPrepareAcpRegistryAgentRpc,

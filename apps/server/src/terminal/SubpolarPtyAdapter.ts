@@ -1,13 +1,13 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 
-import { createEnvironmentManagerHttpClient } from "@subpolar/environments/manager-client";
-import type { EnvironmentRequest } from "@subpolar/environments";
 import * as Effect from "effect/Effect";
 
 import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
+import { createSubpolarManagerAccess } from "../environment/SubpolarManagerAccess.ts";
 
 export interface ManagedTerminalSpawnInput {
+  readonly providerInstanceId: string | null;
   readonly threadId: string;
   readonly terminalId: string;
   readonly worktreePath: string | null;
@@ -51,38 +51,44 @@ function managedEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
   return result;
 }
 
-function requestFor(input: ManagedTerminalSpawnInput, environment: NodeJS.ProcessEnv): {
-  readonly request: EnvironmentRequest;
-  readonly relativeCwd: string;
-  readonly clientSessionId: string;
-} {
-  const storageRoot = environment.SUBPOLAR_STORAGE_ROOT?.trim();
-  const worktreePath = input.worktreePath;
-  if (!storageRoot || !path.isAbsolute(storageRoot)) {
-    throw new Error("Managed terminal storage root is not configured");
-  }
-  if (!worktreePath || !path.isAbsolute(worktreePath) || !path.isAbsolute(input.cwd)) {
+function requestFor(
+  input: ManagedTerminalSpawnInput,
+  environment: NodeJS.ProcessEnv,
+  managerFetch: typeof fetch,
+) {
+  const access = createSubpolarManagerAccess(
+    {
+      baseUrl: environment.SUBPOLAR_MANAGER_URL?.trim() ?? "",
+      storageRoot: environment.SUBPOLAR_STORAGE_ROOT?.trim() ?? "",
+      allowPrivateHttp: environment.SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP === "true",
+      fetch: managerFetch,
+    },
+    {
+      providerInstanceId: input.providerInstanceId,
+      instanceToken: input.env.SUBPOLAR_MANAGER_INSTANCE_TOKEN,
+      worktreePath: input.worktreePath,
+    },
+  );
+  if (!input.worktreePath || !path.isAbsolute(input.cwd)) {
     throw new Error("Managed terminal requires an absolute T3 worktree and working directory");
   }
-  const root = path.resolve(worktreePath);
   const cwd = path.resolve(input.cwd);
-  const relativeCwd = path.relative(root, cwd);
-  if (relativeCwd === ".." || relativeCwd.startsWith(`..${path.sep}`) || path.isAbsolute(relativeCwd)) {
+  const relativeCwd = path.relative(access.environment.worktreePath, cwd);
+  if (
+    relativeCwd === ".." ||
+    relativeCwd.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativeCwd)
+  ) {
     throw new Error("Managed terminal working directory is outside its T3 worktree");
   }
-  const workspaceId = `ws_${createHash("sha256").update(root).digest("hex").slice(0, 24)}`;
   const terminalKey = createHash("sha256")
     .update(input.threadId)
     .update("\0")
     .update(input.terminalId)
     .digest("hex");
   return {
-    request: {
-      ownerId: environment.SUBPOLAR_OWNER_ID?.trim() || "t3-installation",
-      workspaceId,
-      storageRoot,
-      worktreePath: root,
-    },
+    manager: access.manager,
+    request: access.environment,
     relativeCwd: relativeCwd || ".",
     clientSessionId: `t3-terminal-${terminalKey}`,
   };
@@ -95,30 +101,21 @@ function requestFor(input: ManagedTerminalSpawnInput, environment: NodeJS.Proces
  */
 export function makeSubpolarTerminalSpawner(
   environment: NodeJS.ProcessEnv = process.env,
+  managerFetch: typeof fetch = fetch,
 ): ManagedTerminalSpawn | undefined {
-  const configured = [
-    environment.SUBPOLAR_MANAGER_URL,
-    environment.SUBPOLAR_MANAGER_TOKEN,
-    environment.SUBPOLAR_STORAGE_ROOT,
-  ].filter((value) => value?.trim()).length;
+  const configured = [environment.SUBPOLAR_MANAGER_URL, environment.SUBPOLAR_STORAGE_ROOT].filter(
+    (value) => value?.trim(),
+  ).length;
   if (configured === 0) return undefined;
-  if (configured !== 3) {
-    throw new Error(
-      "Managed terminals require SUBPOLAR_MANAGER_URL, SUBPOLAR_MANAGER_TOKEN, and SUBPOLAR_STORAGE_ROOT",
-    );
+  if (configured !== 2) {
+    throw new Error("Managed terminals require SUBPOLAR_MANAGER_URL and SUBPOLAR_STORAGE_ROOT");
   }
-
-  const manager = createEnvironmentManagerHttpClient({
-    baseUrl: environment.SUBPOLAR_MANAGER_URL!.trim(),
-    token: environment.SUBPOLAR_MANAGER_TOKEN!.trim(),
-    allowPrivateHttp: environment.SUBPOLAR_MANAGER_ALLOW_PRIVATE_HTTP === "true",
-  });
 
   return (input) =>
     Effect.tryPromise({
       try: async () => {
-        const bound = requestFor(input, environment);
-        const session = await manager.startInteractive(
+        const bound = requestFor(input, environment, managerFetch);
+        const session = await bound.manager.startInteractive(
           bound.request,
           [input.shell, ...input.args],
           {
@@ -128,13 +125,20 @@ export function makeSubpolarTerminalSpawner(
           },
         );
         try {
-          await manager.resizeInteractive(bound.request, session.sessionId, input.cols, input.rows);
+          await bound.manager.resizeInteractive(
+            bound.request,
+            session.sessionId,
+            input.cols,
+            input.rows,
+          );
         } catch (cause) {
-          await manager.terminateInteractive(bound.request, session.sessionId).catch(() => undefined);
+          await bound.manager
+            .terminateInteractive(bound.request, session.sessionId)
+            .catch(() => undefined);
           throw cause;
         }
         return new ManagedTerminalPtyProcess(
-          manager,
+          bound.manager,
           bound.request,
           session.sessionId,
           session.sequence ?? 0,
@@ -169,12 +173,18 @@ class ManagedTerminalPtyProcess implements PtyAdapter.PtyProcess {
 
   write(data: string): void {
     this.enqueue(() =>
-      this.manager.writeInteractive(this.environment, this.sessionId, new TextEncoder().encode(data)),
+      this.manager.writeInteractive(
+        this.environment,
+        this.sessionId,
+        new TextEncoder().encode(data),
+      ),
     );
   }
 
   resize(cols: number, rows: number): void {
-    this.enqueue(() => this.manager.resizeInteractive(this.environment, this.sessionId, cols, rows));
+    this.enqueue(() =>
+      this.manager.resizeInteractive(this.environment, this.sessionId, cols, rows),
+    );
   }
 
   kill(): void {
@@ -201,14 +211,20 @@ class ManagedTerminalPtyProcess implements PtyAdapter.PtyProcess {
 
   private enqueue(operation: () => Promise<void>): void {
     this.writeQueue = this.writeQueue.then(operation).catch(() => {
-      void this.manager.terminateInteractive(this.environment, this.sessionId).catch(() => undefined);
+      void this.manager
+        .terminateInteractive(this.environment, this.sessionId)
+        .catch(() => undefined);
       this.finish({ exitCode: 1, signal: null });
     });
   }
 
   private async readOutput(): Promise<void> {
     try {
-      for await (const event of this.manager.attachInteractiveOutput(this.environment, this.sessionId, this.cursor)) {
+      for await (const event of this.manager.attachInteractiveOutput(
+        this.environment,
+        this.sessionId,
+        this.cursor,
+      )) {
         if (event.type === "output") {
           this.cursor = event.sequence;
           const data = this.decoder.decode(event.data, { stream: true });

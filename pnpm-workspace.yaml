@@ -220,6 +220,8 @@ minimumReleaseAgeExclude:
   - "@expo/schema-utils@58.0.2"
 
 overrides:
+  # Pi 1.0.2's built entry expects the matching codemode declarations exports.
+  "@earendil-works/pi-coding-agent>@earendil-works/pi-codemode": "1.0.2"
   # Keep jsdom's optional peer consistent so Vite+ has one test-runner instance.
   "@exodus/bytes>@noble/hashes": "1.8.0"
   # Earlier React Navigation declarations create a circular type alias in TypeScript 7.

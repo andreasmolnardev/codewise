@@ -6,7 +6,6 @@ import {
   ProjectSettingsOverrides,
   type ProviderInstanceConfig,
   type ProviderInstanceMutation,
-  type ProviderInstanceMcpServerConfig,
   defaultInstanceIdForDriver,
   isProviderDriverKind,
   ProviderDriverKind,
@@ -118,14 +117,6 @@ const normalizeServerSettings = (
   encodeServerSettings(settings).pipe(
     Effect.flatMap(decodeServerSettings),
     Effect.map(foldProviderInstanceEnabledFlags),
-    Effect.map((next) => ({
-      ...next,
-      providerInstanceMcpServers: Object.fromEntries(
-        Object.entries(next.providerInstanceMcpServers).filter(([instanceId]) =>
-          Object.hasOwn(next.providerInstances, instanceId),
-        ),
-      ) as ServerSettings["providerInstanceMcpServers"],
-    })),
     Effect.map((next) => ({ ...next, ...deriveLegacyProjectOverrides(next) })),
     Effect.mapError(
       (cause) =>
@@ -138,14 +129,11 @@ const normalizeServerSettings = (
   );
 
 export function redactServerSettingsForClient(settings: ServerSettings): ServerSettings {
-  return {
-    ...mapSettingsSecrets(settings, (secret) =>
-      secret.sensitive
-        ? { value: "", redacted: secret.redacted || secret.value.length > 0 }
-        : { value: secret.value, redacted: false },
-    ),
-    providerInstanceMcpServers: {},
-  };
+  return mapSettingsSecrets(settings, (secret) =>
+    secret.sensitive
+      ? { value: "", redacted: secret.redacted || secret.value.length > 0 }
+      : { value: secret.value, redacted: false },
+  );
 }
 
 export function applyProviderInstanceMutation(
@@ -158,9 +146,7 @@ export function applyProviderInstanceMutation(
   } else {
     delete providerInstances[mutation.instanceId];
   }
-  const providerInstanceMcpServers = { ...settings.providerInstanceMcpServers };
-  if (mutation.operation === "remove") delete providerInstanceMcpServers[mutation.instanceId];
-  return { ...settings, providerInstances, providerInstanceMcpServers };
+  return { ...settings, providerInstances };
 }
 
 function ensureProviderInstanceMutationAllowed(
@@ -200,20 +186,6 @@ export class ServerSettingsService extends Context.Service<
       mutation: ProviderInstanceMutation,
       patch?: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
-
-    readonly listProviderInstanceMcpServers: (
-      providerInstanceId: ProviderInstanceId,
-    ) => Effect.Effect<readonly ProviderInstanceMcpServerConfig[], ServerSettingsError>;
-
-    readonly putProviderInstanceMcpServer: (
-      providerInstanceId: ProviderInstanceId,
-      config: ProviderInstanceMcpServerConfig,
-    ) => Effect.Effect<void, ServerSettingsError>;
-
-    readonly removeProviderInstanceMcpServer: (
-      providerInstanceId: ProviderInstanceId,
-      serverId: string,
-    ) => Effect.Effect<void, ServerSettingsError>;
 
     readonly withSettingsSnapshot: <A, E, R>(
       use: (settings: ServerSettings) => Effect.Effect<A, E, R>,
@@ -281,51 +253,6 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
             return applyProviderInstanceMutation(patched, mutation);
           }),
         ),
-      listProviderInstanceMcpServers: (providerInstanceId) =>
-        Ref.get(currentSettingsRef).pipe(
-          Effect.map((settings) => settings.providerInstanceMcpServers[providerInstanceId] ?? []),
-        ),
-      putProviderInstanceMcpServer: (providerInstanceId, config) =>
-        updateTestSettings((current) =>
-          Effect.gen(function* () {
-            if (current.providerInstances[providerInstanceId] === undefined) {
-              return yield* Effect.fail(
-                new ServerSettingsError({
-                  settingsPath: "test settings",
-                  operation: "put-provider-instance-mcp-server",
-                  providerInstanceId,
-                }),
-              );
-            }
-            const currentServers = current.providerInstanceMcpServers[providerInstanceId] ?? [];
-            const providerInstanceMcpServers = {
-              ...current.providerInstanceMcpServers,
-              [providerInstanceId]: [
-                ...currentServers.filter((server) => server.id !== config.id),
-                config,
-              ],
-            };
-            return { ...current, providerInstanceMcpServers };
-          }),
-        ).pipe(Effect.asVoid),
-      removeProviderInstanceMcpServer: (providerInstanceId, serverId) =>
-        updateTestSettings((current) => {
-          if (current.providerInstances[providerInstanceId] === undefined) {
-            return Effect.fail(
-              new ServerSettingsError({
-                settingsPath: "test settings",
-                operation: "remove-provider-instance-mcp-server",
-                providerInstanceId,
-              }),
-            );
-          }
-          const currentServers = current.providerInstanceMcpServers[providerInstanceId] ?? [];
-          const remaining = currentServers.filter((server) => server.id !== serverId);
-          const providerInstanceMcpServers = { ...current.providerInstanceMcpServers };
-          if (remaining.length === 0) delete providerInstanceMcpServers[providerInstanceId];
-          else providerInstanceMcpServers[providerInstanceId] = remaining;
-          return Effect.succeed({ ...current, providerInstanceMcpServers });
-        }).pipe(Effect.asVoid),
       withSettingsSnapshot: (use) =>
         writeSemaphore.withPermits(1)(getSettings.pipe(Effect.flatMap(use))),
       streamChanges: Stream.empty,
@@ -1233,52 +1160,6 @@ const make = Effect.gen(function* () {
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),
-    listProviderInstanceMcpServers: (providerInstanceId) =>
-      getSettingsFromCache.pipe(
-        Effect.map((settings) => settings.providerInstanceMcpServers[providerInstanceId] ?? []),
-      ),
-    putProviderInstanceMcpServer: (providerInstanceId, config) =>
-      updateAndPersistSettings((current) => {
-        if (current.providerInstances[providerInstanceId] === undefined) {
-          return Effect.fail(
-            new ServerSettingsError({
-              settingsPath,
-              operation: "put-provider-instance-mcp-server",
-              providerInstanceId,
-            }),
-          );
-        }
-        const currentServers = current.providerInstanceMcpServers[providerInstanceId] ?? [];
-        return Effect.succeed({
-          ...current,
-          providerInstanceMcpServers: {
-            ...current.providerInstanceMcpServers,
-            [providerInstanceId]: [
-              ...currentServers.filter((server) => server.id !== config.id),
-              config,
-            ],
-          },
-        });
-      }).pipe(Effect.asVoid),
-    removeProviderInstanceMcpServer: (providerInstanceId, serverId) =>
-      updateAndPersistSettings((current) => {
-        if (current.providerInstances[providerInstanceId] === undefined) {
-          return Effect.fail(
-            new ServerSettingsError({
-              settingsPath,
-              operation: "remove-provider-instance-mcp-server",
-              providerInstanceId,
-            }),
-          );
-        }
-        const remaining = (current.providerInstanceMcpServers[providerInstanceId] ?? []).filter(
-          (server) => server.id !== serverId,
-        );
-        const providerInstanceMcpServers = { ...current.providerInstanceMcpServers };
-        if (remaining.length === 0) delete providerInstanceMcpServers[providerInstanceId];
-        else providerInstanceMcpServers[providerInstanceId] = remaining;
-        return Effect.succeed({ ...current, providerInstanceMcpServers });
-      }).pipe(Effect.asVoid),
     withSettingsSnapshot,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));

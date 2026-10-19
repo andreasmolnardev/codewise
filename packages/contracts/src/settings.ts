@@ -42,7 +42,6 @@ import {
 import {
   ProviderInstanceConfig,
   ProviderInstanceId,
-  ProviderInstanceMcpServerConfig,
   ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
@@ -1228,12 +1227,6 @@ export const ServerSettings = Schema.Struct({
   providerInstances: Schema.Record(ProviderInstanceId, ProviderInstanceConfig).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  /** Remote MCP configuration belongs to a provider instance, but stays outside
-   * its driver-specific config blob so older provider editors cannot erase it. */
-  providerInstanceMcpServers: Schema.Record(
-    ProviderInstanceId,
-    Schema.Array(ProviderInstanceMcpServerConfig),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   sourceControlHosts: Schema.Record(Schema.String, SourceControlHostSettings).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
@@ -1318,8 +1311,6 @@ export const ServerSettingsOperation = Schema.Literals([
   "normalize",
   "check-exists",
   "create-provider-instance",
-  "put-provider-instance-mcp-server",
-  "remove-provider-instance-mcp-server",
   "read-file",
   "read-provider-history",
   "read-project-settings",

@@ -2604,9 +2604,6 @@ it.layer(
         getSettings: Effect.fail(settingsError),
         updateSettings: () => Effect.fail(settingsError),
         updateProviderInstance: () => Effect.fail(settingsError),
-        listProviderInstanceMcpServers: () => Effect.fail(settingsError),
-        putProviderInstanceMcpServer: () => Effect.fail(settingsError),
-        removeProviderInstanceMcpServer: () => Effect.fail(settingsError),
         withSettingsSnapshot: () => Effect.fail(settingsError),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.succeed(Stream.empty),
@@ -2697,6 +2694,46 @@ it.layer(
             [ProviderInstanceId.make("codex")]: {
               driver: ProviderDriverKind.make("codex"),
               config: { homePath: "~/.codex-default" },
+            },
+          },
+        }),
+      ),
+    ),
+  );
+
+  it.effect("binds managed terminal manager access to its provider instance", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const serverSettings = yield* ServerSettings.ServerSettingsService;
+      const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+        serverSettings,
+        path,
+        rawProviderInstanceId: "subpolar_team_a",
+        env: {
+          SUBPOLAR_OWNER_ID: "forged-owner",
+          SUBPOLAR_PROVIDER_INSTANCE_ID: "forged-provider",
+          SUBPOLAR_MANAGER_INSTANCE_TOKEN: "forged-token",
+        },
+      });
+
+      expect(environment.SUBPOLAR_OWNER_ID).toBe("subpolar_team_a");
+      expect(environment.SUBPOLAR_PROVIDER_INSTANCE_ID).toBe("subpolar_team_a");
+      expect(environment.SUBPOLAR_MANAGER_INSTANCE_TOKEN).toBe("instance-token");
+      expect(environment.SUBPOLAR_MANAGER_TOKEN).toBeUndefined();
+    }).pipe(
+      Effect.provide(
+        ServerSettings.ServerSettingsService.layerTest({
+          providerInstances: {
+            [ProviderInstanceId.make("subpolar_team_a")]: {
+              driver: ProviderDriverKind.make("pi"),
+              environment: [
+                { name: "SUBPOLAR_OWNER_ID", value: "stale-owner", sensitive: false },
+                {
+                  name: "SUBPOLAR_MANAGER_INSTANCE_TOKEN",
+                  value: "instance-token",
+                  sensitive: true,
+                },
+              ],
             },
           },
         }),

@@ -85,7 +85,7 @@ Set these values in `docker/.env` before enabling the profile:
 ```dotenv
 SUBPOLAR_MANAGER_URL=http://subpolar-manager:8787
 SUBPOLAR_MANAGER_TOKEN=<random secret of at least 32 characters>
-SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","stdio","execute"]}}
+SUBPOLAR_MANAGER_INSTANCE_TOKENS={"<provider-instance-secret>":{"ownerId":"subpolar_team_a","storageRoot":"/workspaces","allowedOperations":["identity","ensure","start","pty","stdio","tcp","execute"]}}
 SUBPOLAR_STORAGE_ROOT=/workspaces
 SUBPOLAR_DOCKER_HOST_STORAGE_ROOT=<volume Mountpoint from docker volume inspect>
 SUBPOLAR_DOCKER_GID=<numeric group that can access /var/run/docker.sock>

@@ -1377,6 +1377,20 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
   }
 
   let resolved = yield* mergeProviderInstanceEnvironment(instance.environment, input.env ?? {});
+  const configuredManagerInstanceToken = instance.environment
+    ?.filter((variable) => variable.name === "SUBPOLAR_MANAGER_INSTANCE_TOKEN")
+    .at(-1)
+    ?.value.trim();
+  // The provider-instance settings are the trust source for manager access.
+  // Do not let a terminal client's env override another instance's token or
+  // owner; the gateway admin token is never valid for managed PTY requests.
+  delete resolved.SUBPOLAR_MANAGER_INSTANCE_TOKEN;
+  delete resolved.SUBPOLAR_OWNER_ID;
+  resolved.SUBPOLAR_PROVIDER_INSTANCE_ID = input.rawProviderInstanceId;
+  if (configuredManagerInstanceToken) {
+    resolved.SUBPOLAR_MANAGER_INSTANCE_TOKEN = configuredManagerInstanceToken;
+    resolved.SUBPOLAR_OWNER_ID = input.rawProviderInstanceId;
+  }
   if (instance.driver === "codex") {
     const config = decodeCodexSettings(instance.config ?? {});
     if (Option.isSome(config)) {
@@ -2185,6 +2199,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         });
       }
       const managed = yield* options.managedPtySpawn({
+        providerInstanceId: session.providerInstanceId,
         threadId: session.threadId,
         terminalId: session.terminalId,
         worktreePath: session.worktreePath,

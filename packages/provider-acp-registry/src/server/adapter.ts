@@ -29,6 +29,7 @@ import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import { registerSubpolarCredentialExtension } from "./subpolarCredentials.ts";
 import { registerSubpolarModelEgressExtension } from "./subpolarModelEgress.ts";
 import { bindSubpolarProviderInstanceEnvironment } from "./subpolarInstanceEnvironment.ts";
+import { subpolarMcpEnvironment } from "./subpolarMcpConfig.ts";
 import {
   normalizeAcpRegistryCommands,
   normalizeAcpRegistryLiveConfiguration,
@@ -187,10 +188,22 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     registryAgentId === "github-copilot-cli" ||
     (options.settings.source === "local" &&
       /^copilot(\.exe|\.cmd)?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? ""));
-  const isSubpolar = registryAgentId === "subpolar" ||
+  const isSubpolar =
+    registryAgentId === "subpolar" ||
     (options.settings.source === "local" &&
-      /^subpolar-acp(\.(?:exe|cmd|js|mjs|ts))?$/i.test(options.settings.commandPath.split(/[\\/]/).pop() ?? "")) ||
-    options.settings.enableSubpolarCredentialBroker || options.settings.enableSubpolarModelEgress;
+      /^subpolar-acp(\.(?:exe|cmd|js|mjs|ts))?$/i.test(
+        options.settings.commandPath.split(/[\\/]/).pop() ?? "",
+      )) ||
+    options.settings.enableSubpolarCredentialBroker ||
+    options.settings.enableSubpolarModelEgress;
+  const providerEnvironment = isSubpolar
+    ? yield* subpolarMcpEnvironment({
+        stateDir: options.host.paths.stateDir,
+        providerInstanceId: options.instanceId,
+        environment: options.environment,
+      })
+    : options.environment;
+  const runtimeOptions = { ...options, environment: providerEnvironment };
   const copilotRouting = isCopilot ? makeCopilotSubagentRouting() : undefined;
   const flavor: AcpAdapterV2Flavor = {
     driver: ACP_REGISTRY_PROVIDER,
@@ -219,7 +232,7 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
           normalizeSessionUpdate: copilotRouting.normalizeSessionUpdate,
           extractSubagentUpdate: extractCopilotSubagentUpdate,
         }),
-    makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(options, catalog),
+    makeRuntime: options.makeRuntime ?? makeAcpRegistryRuntime(runtimeOptions, catalog),
     ...(runtimeCoordinator === undefined
       ? {}
       : {
@@ -250,29 +263,33 @@ export const makeAcpRegistryAdapterV2 = Effect.fn("makeAcpRegistryAdapterV2")(fu
     ...(options.assertComplete === undefined ? {} : { assertComplete: options.assertComplete }),
   };
   const registerExistingExtensions = flavor.registerExtensions;
-  const configuredFlavor = options.settings.enableSubpolarCredentialBroker || options.settings.enableSubpolarModelEgress
-    ? {
-        ...flavor,
-        registerExtensions: (context: AcpAdapterV2ExtensionContext) =>
-          Effect.gen(function* () {
-            if (registerExistingExtensions) yield* registerExistingExtensions(context);
-            const providerIds = options.settings.subpolarCredentialProviderId
-              ? [options.settings.subpolarCredentialProviderId]
-              : [];
-            if (options.settings.enableSubpolarCredentialBroker) {
-              yield* registerSubpolarCredentialExtension({
-                host: options.host,
-                instanceId: options.instanceId,
-                providerIds,
-                context,
-              });
-            }
-            if (options.settings.enableSubpolarModelEgress && options.settings.enableSubpolarCredentialBroker) {
-              yield* registerSubpolarModelEgressExtension({ providerIds, context });
-            }
-          }),
-      }
-    : flavor;
+  const configuredFlavor =
+    options.settings.enableSubpolarCredentialBroker || options.settings.enableSubpolarModelEgress
+      ? {
+          ...flavor,
+          registerExtensions: (context: AcpAdapterV2ExtensionContext) =>
+            Effect.gen(function* () {
+              if (registerExistingExtensions) yield* registerExistingExtensions(context);
+              const providerIds = options.settings.subpolarCredentialProviderId
+                ? [options.settings.subpolarCredentialProviderId]
+                : [];
+              if (options.settings.enableSubpolarCredentialBroker) {
+                yield* registerSubpolarCredentialExtension({
+                  host: options.host,
+                  instanceId: options.instanceId,
+                  providerIds,
+                  context,
+                });
+              }
+              if (
+                options.settings.enableSubpolarModelEgress &&
+                options.settings.enableSubpolarCredentialBroker
+              ) {
+                yield* registerSubpolarModelEgressExtension({ providerIds, context });
+              }
+            }),
+        }
+      : flavor;
   return yield* makeAcpAdapterV2({
     instanceId: options.instanceId,
     flavor: configuredFlavor,
@@ -311,7 +328,10 @@ export const AcpRegistryAdapterV2Driver: ProviderAdapterDriver<
   create: Effect.fn("AcpRegistryAdapterV2Driver.create")(
     function* (input: ProviderAdapterDriverCreateInput<AcpRegistrySettings>) {
       const hostEnvironment = yield* HostProcess.Environment;
-      const processEnvironment = yield* mergeProviderInstanceEnvironment(input.environment, hostEnvironment);
+      const processEnvironment = yield* mergeProviderInstanceEnvironment(
+        input.environment,
+        hostEnvironment,
+      );
       // Subpolar instance credentials are configured per ACP provider. Bind the
       // manager owner and MCP scope to T3's provider ID, never an environment value.
       const configuredInstanceToken = input.environment?.find(

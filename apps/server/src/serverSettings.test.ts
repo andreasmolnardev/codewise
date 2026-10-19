@@ -6,7 +6,6 @@ import {
   ProjectScript,
   ProviderDriverKind,
   ProviderInstanceId,
-  ProviderInstanceMcpServerConfig,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
@@ -99,14 +98,6 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
-  it.effect("defaults the dedicated MCP configuration store when reading older settings", () =>
-    Schema.decodeUnknownEffect(ServerSettings)({ providerInstances: {} }).pipe(
-      Effect.tap((settings) =>
-        Effect.sync(() => assert.deepEqual(settings.providerInstanceMcpServers, {})),
-      ),
-    ),
-  );
-
   it.effect("serializes concurrent model preference edits without cancelling duplicate adds", () =>
     Effect.gen(function* () {
       const service = yield* ServerSettingsModule.ServerSettingsService;
@@ -525,65 +516,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           (yield* serverSettings.getSettings).providerInstances[instanceId]?.displayName ?? "",
         ),
       );
-    }).pipe(Effect.provide(layerServerSettings())),
-  );
-
-  it.effect("persists MCP servers per provider instance independently of provider settings", () =>
-    Effect.gen(function* () {
-      const service = yield* ServerSettingsModule.ServerSettingsService;
-      const serverConfig = yield* ServerConfig.ServerConfig;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const firstId = ProviderInstanceId.make("codex_mcp");
-      const secondId = ProviderInstanceId.make("claude_mcp");
-      const firstServer: ProviderInstanceMcpServerConfig = {
-        id: "docs",
-        url: "https://mcp.example.com/v1",
-        headers: { Authorization: { env: "MCP_DOCS_TOKEN" } },
-        namespace: "docs",
-      };
-      const secondServer: ProviderInstanceMcpServerConfig = {
-        id: "issues",
-        url: "https://issues.example.com/mcp",
-        timeoutMs: 5_000,
-      };
-
-      yield* service.updateSettings({
-        providerInstances: {
-          [firstId]: { driver: ProviderDriverKind.make("codex"), config: {} },
-          [secondId]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
-        },
-      });
-      yield* service.putProviderInstanceMcpServer(firstId, firstServer);
-      yield* service.putProviderInstanceMcpServer(secondId, secondServer);
-
-      // Replacing the provider-instance map must not clear the separate MCP
-      // configuration, which older provider settings clients do not know about.
-      yield* service.updateSettings({
-        providerInstances: {
-          [firstId]: { driver: ProviderDriverKind.make("codex"), enabled: true, config: {} },
-          [secondId]: { driver: ProviderDriverKind.make("claudeAgent"), config: {} },
-        },
-      });
-      assert.deepEqual(yield* service.listProviderInstanceMcpServers(firstId), [firstServer]);
-      assert.deepEqual(yield* service.listProviderInstanceMcpServers(secondId), [secondServer]);
-
-      const persisted = yield* fileSystem
-        .readFileString(serverConfig.settingsPath)
-        .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings))));
-      assert.deepEqual(persisted.providerInstanceMcpServers, {
-        [firstId]: [firstServer],
-        [secondId]: [secondServer],
-      });
-      assert.deepEqual(
-        ServerSettingsModule.redactServerSettingsForClient(persisted).providerInstanceMcpServers,
-        {},
-      );
-
-      yield* service.removeProviderInstanceMcpServer(firstId, firstServer.id);
-      assert.deepEqual(yield* service.listProviderInstanceMcpServers(firstId), []);
-      assert.deepEqual(yield* service.listProviderInstanceMcpServers(secondId), [secondServer]);
-      yield* service.updateProviderInstance({ operation: "remove", instanceId: secondId });
-      assert.deepEqual(yield* service.listProviderInstanceMcpServers(secondId), []);
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
@@ -1091,7 +1023,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           ServerSettingsModule.resolveSourceControlWriterModelSelection(restored),
           sourceControlWriterModelSelection,
         );
-      }).pipe(Effect.provide(makeServerSettingsLayer())),
+      }).pipe(Effect.provide(layerServerSettings())),
   );
 
   it.effect("drops stale text generation options when resetting model selection", () =>
