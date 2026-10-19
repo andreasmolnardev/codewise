@@ -1,4 +1,12 @@
-import type { AgentRunPort, JsonValue, RunProgressEmitter, RunRequest, RuntimeToolInvoker, StatelessExecutor, ToolDefinition } from "../../subpolar-contracts/src/index.ts";
+import type {
+  AgentRunPort,
+  JsonValue,
+  RunProgressEmitter,
+  RunRequest,
+  RuntimeToolInvoker,
+  StatelessExecutor,
+  ToolDefinition,
+} from "../../subpolar-contracts/src/index.ts";
 
 export interface PiExecutionContext {
   principal: RunRequest["context"]["principal"];
@@ -113,7 +121,8 @@ export class PiRuntimeError extends Error {
 }
 
 function mapContext(request: RunRequest): PiExecutionContext {
-  const { principal, sessionId, projectId, agentId, model, permission, cwd, metadata } = request.context;
+  const { principal, sessionId, projectId, agentId, model, permission, cwd, metadata } =
+    request.context;
   return {
     principal,
     ...(sessionId === undefined ? {} : { sessionId }),
@@ -142,12 +151,18 @@ function normalizeTranscriptEntry(value: unknown, index: number): PiTranscriptEn
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new PiRuntimeError(`Transcript entry ${index} must be an object`);
   }
-  const entry = value as { role?: unknown; content?: unknown; occurredAt?: unknown; metadata?: unknown };
+  const entry = value as {
+    role?: unknown;
+    content?: unknown;
+    occurredAt?: unknown;
+    metadata?: unknown;
+  };
   if (entry.role !== "user" && entry.role !== "assistant" && entry.role !== "tool") {
     throw new PiRuntimeError(`Transcript entry ${index} has an invalid role`);
   }
   const content = jsonDetails(entry.content);
-  if (content === undefined) throw new PiRuntimeError(`Transcript entry ${index} has invalid content`);
+  if (content === undefined)
+    throw new PiRuntimeError(`Transcript entry ${index} has invalid content`);
   if (entry.occurredAt !== undefined && typeof entry.occurredAt !== "string") {
     throw new PiRuntimeError(`Transcript entry ${index} has an invalid timestamp`);
   }
@@ -167,11 +182,12 @@ function normalizeTranscriptEntry(value: unknown, index: number): PiTranscriptEn
 export function normalizePiTranscriptProjection(
   value: PiTranscriptProjection | readonly PiTranscriptEntry[] | undefined,
 ): PiTranscriptProjection {
-  const source: PiTranscriptProjection = value === undefined
-    ? { entries: [] }
-    : Array.isArray(value as unknown)
-      ? { entries: [...(value as readonly PiTranscriptEntry[])] }
-      : value as PiTranscriptProjection;
+  const source: PiTranscriptProjection =
+    value === undefined
+      ? { entries: [] }
+      : Array.isArray(value as unknown)
+        ? { entries: [...(value as readonly PiTranscriptEntry[])] }
+        : (value as PiTranscriptProjection);
   if (!source || typeof source !== "object" || !Array.isArray(source.entries)) {
     throw new PiRuntimeError("Pi transcript projection must contain an entries array");
   }
@@ -211,9 +227,12 @@ export function normalizePiStreamEvent(value: PiStreamEvent | unknown): PiStream
   const source = value as Record<string, unknown>;
   const sourceType = typeof source.type === "string" ? source.type : "message";
   const type = normalizedEventTypes.has(sourceType as PiStreamEvent["type"])
-    ? sourceType as PiStreamEvent["type"]
-    : eventTypeAliases[sourceType] ?? "message";
-  const dataSource = "data" in source ? source.data : Object.fromEntries(Object.entries(source).filter(([key]) => key !== "type"));
+    ? (sourceType as PiStreamEvent["type"])
+    : (eventTypeAliases[sourceType] ?? "message");
+  const dataSource =
+    "data" in source
+      ? source.data
+      : Object.fromEntries(Object.entries(source).filter(([key]) => key !== "type"));
   return { type, data: jsonDetails(dataSource) ?? null };
 }
 
@@ -222,7 +241,9 @@ function mapError(error: unknown): PiProviderError | PiRuntimeError {
   const candidate = error as { kind?: unknown; message?: unknown; details?: unknown } | null;
   const message = typeof candidate?.message === "string" ? candidate.message : undefined;
   const details = jsonDetails(candidate?.details);
-  return candidate?.kind === "provider" ? new PiProviderError(message, details) : new PiRuntimeError(message, details);
+  return candidate?.kind === "provider"
+    ? new PiProviderError(message, details)
+    : new PiRuntimeError(message, details);
 }
 
 /**
@@ -231,7 +252,10 @@ function mapError(error: unknown): PiProviderError | PiRuntimeError {
  * which lets an SDK integration configure a session without coupling this
  * package to a particular Pi SDK version.
  */
-export function createPiRunPort<Config>(factory: PiExecutorFactory<Config>, config: Config): PiRunPort {
+export function createPiRunPort<Config>(
+  factory: PiExecutorFactory<Config>,
+  config: Config,
+): PiRunPort {
   return {
     capabilities: piAdapterCapabilities,
     async run(request: PiRunRequest, emit?: RunProgressEmitter) {
@@ -285,7 +309,9 @@ export class InMemoryPiSession implements PiExecutionSession {
   private disposedState = false;
 
   constructor(
-    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({ prompt }) => ({ text: prompt }),
+    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({
+      prompt,
+    }) => ({ text: prompt }),
   ) {}
 
   get transcript(): PiTranscriptProjection {
@@ -313,7 +339,9 @@ export class InMemoryPiExecutor implements PiExecutor {
   private session?: InMemoryPiSession;
 
   constructor(
-    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({ prompt }) => ({ text: prompt }),
+    private readonly handler: (request: PiExecutionRequest) => unknown | Promise<unknown> = ({
+      prompt,
+    }) => ({ text: prompt }),
   ) {}
 
   get activeSession(): InMemoryPiSession | undefined {
@@ -321,7 +349,8 @@ export class InMemoryPiExecutor implements PiExecutor {
   }
 
   async execute(request: PiExecutionRequest): Promise<unknown> {
-    if (this.session?.disposed === false) throw new PiRuntimeError("Pi in-memory executor is already running");
+    if (this.session?.disposed === false)
+      throw new PiRuntimeError("Pi in-memory executor is already running");
     this.session = new InMemoryPiSession(this.handler);
     return this.session.execute(request);
   }
@@ -338,29 +367,47 @@ export function createInMemoryPiExecutor(
 }
 
 export { createPiSdkExecutorFactory, loadPiSdk, PI_SDK_MODULE, validatePiSession } from "./sdk.ts";
-export type { PiSdkModule, PiSdkConfig, PiSessionManager, PiSessionManagerApi } from "./sdk.ts";
+export type {
+  PiSdkModule,
+  PiSdkConfig,
+  PiSessionManager,
+  PiSessionManagerApi,
+  PiThinkingLevel,
+} from "./sdk.ts";
 
 /** Share request/context, gateway tools, cancellation and events with any host. */
 export function createPiStatelessExecutor<Config>(
   factory: PiExecutorFactory<Config>,
   config: Config,
-  transcript?: (execution: Parameters<StatelessExecutor>[0]) => PiRunRequest["transcript"] | Promise<PiRunRequest["transcript"]>,
+  transcript?: (
+    execution: Parameters<StatelessExecutor>[0],
+  ) => PiRunRequest["transcript"] | Promise<PiRunRequest["transcript"]>,
   toolDefinitions: readonly ToolDefinition[] = [],
 ): StatelessExecutor {
   const port = createPiRunPort(factory, config);
-  return async (execution) => port.run({
-    runId: execution.request.runId,
-    prompt: execution.request.prompt,
-    context: execution.context,
-    signal: execution.request.signal,
-    tools: execution.tools,
-    transcript: await transcript?.(execution),
-    toolDefinitions,
-  }, execution.emit);
+  return async (execution) =>
+    port.run(
+      {
+        runId: execution.request.runId,
+        prompt: execution.request.prompt,
+        context: execution.context,
+        signal: execution.request.signal,
+        tools: execution.tools,
+        transcript: await transcript?.(execution),
+        toolDefinitions,
+      },
+      execution.emit,
+    );
 }
 
-export async function resolvePiExecutorFactory(moduleValue: PiExecutorModule): Promise<PiExecutorFactory> {
-  const factory = typeof moduleValue === "function" ? moduleValue : moduleValue.default ?? moduleValue.createPiExecutor;
-  if (typeof factory !== "function") throw new PiRuntimeError("Pi executor module must export a factory");
+export async function resolvePiExecutorFactory(
+  moduleValue: PiExecutorModule,
+): Promise<PiExecutorFactory> {
+  const factory =
+    typeof moduleValue === "function"
+      ? moduleValue
+      : (moduleValue.default ?? moduleValue.createPiExecutor);
+  if (typeof factory !== "function")
+    throw new PiRuntimeError("Pi executor module must export a factory");
   return factory;
 }

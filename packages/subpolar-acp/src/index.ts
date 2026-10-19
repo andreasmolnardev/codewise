@@ -24,6 +24,7 @@ import {
   type PiExecutorFactory,
   type PiSdkConfig,
   type PiSdkModule,
+  type PiThinkingLevel,
 } from "@subpolar/runtime-pi";
 import { createAcpCredentialStore } from "./credentialStore.ts";
 import { installAcpModelFetch } from "./modelEgress.ts";
@@ -97,6 +98,13 @@ function combinePolicyRules(...rules: Array<PolicyRules | undefined>): PolicyRul
   if (present.some((rule) => rule.requiresApproval === true)) return { requiresApproval: true };
   if (present.some((rule) => rule.allow === true)) return { allow: true };
   return {};
+}
+
+function piThinkingLevel(value: string): PiThinkingLevel {
+  if (["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)) {
+    return value as PiThinkingLevel;
+  }
+  throw new Error(`Unsupported Pi thinking level: ${value}`);
 }
 
 function createRuntimeHost(
@@ -198,12 +206,26 @@ function makeAgent(
         }
       : options;
     const allowedToolIds = initializedOptions.profile?.allowedToolIds;
+    const profile = initializedOptions.profile;
+    const hasPiProfileOptions =
+      profile?.model !== undefined ||
+      profile?.thinkingLevel !== undefined ||
+      profile?.instructions !== undefined;
     const profileOptions: SubpolarAcpOptions = {
       ...initializedOptions,
-      ...(initializedOptions.profile?.model === undefined
+      ...(!hasPiProfileOptions
         ? {}
         : {
-            piConfig: { ...initializedOptions.piConfig, model: initializedOptions.profile.model },
+            piConfig: {
+              ...initializedOptions.piConfig,
+              ...(profile?.model === undefined ? {} : { model: profile.model }),
+              ...(profile?.thinkingLevel === undefined
+                ? {}
+                : { thinkingLevel: piThinkingLevel(profile.thinkingLevel) }),
+              ...(profile?.instructions === undefined
+                ? {}
+                : { instructions: profile.instructions }),
+            },
           }),
       ...(allowedToolIds === undefined
         ? {}

@@ -380,10 +380,21 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
             enabled: true,
             risk: "low",
           },
+          {
+            id: "test.other",
+            namespace: "test",
+            description: "A tool excluded by the profile",
+            inputSchema: { type: "object", properties: {}, additionalProperties: false },
+            enabled: true,
+            risk: "low",
+          },
         ],
+        piConfig: { model: "configured-model", cwd: "/tmp/configured-pi" },
         resolveToolPolicy: () => ({ allow: true }),
         profile: {
           model: "profile-model",
+          thinkingLevel: "high",
+          instructions: "Follow the project-specific profile guidance.",
           allowedToolIds: ["test.echo"],
           toolPolicies: { "test.echo": { allow: true } },
         },
@@ -394,7 +405,17 @@ it.effect("routes Subpolar tool calls through T3's exact-call ACP permission req
         },
         executorFactory: async (_config, request) => ({
           async execute() {
-            assert.equal((_config as { model?: string } | undefined)?.model, "profile-model");
+            assert.deepEqual(_config, {
+              model: "profile-model",
+              cwd: "/tmp/configured-pi",
+              thinkingLevel: "high",
+              instructions: "Follow the project-specific profile guidance.",
+              resumeSessionIds: new Set(),
+            });
+            assert.deepEqual(
+              request!.toolDefinitions?.map(({ id }) => id),
+              ["test.echo"],
+            );
             return request!.tools!.call({
               callId: "exact-call-1",
               toolId: "test.echo",

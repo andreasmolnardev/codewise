@@ -1,7 +1,16 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { createPolicyGateway, createStatelessSubpolarRuntime } from "../../subpolar-core/src/index.ts";
-import { createPiStatelessExecutor, createPiSdkExecutorFactory, type PiExecutionRequest, type PiSdkModule, type PiSessionManager } from "../src/index.ts";
+import {
+  createPolicyGateway,
+  createStatelessSubpolarRuntime,
+} from "../../subpolar-core/src/index.ts";
+import {
+  createPiStatelessExecutor,
+  createPiSdkExecutorFactory,
+  type PiExecutionRequest,
+  type PiSdkModule,
+  type PiSessionManager,
+} from "../src/index.ts";
 
 function sessionManagerApi() {
   const files = new Map<string, PiSessionManager>();
@@ -22,7 +31,9 @@ function sessionManagerApi() {
       return manager;
     },
     findById: (cwd: string, id: string, dir = "/sessions") =>
-      [...files].find(([, manager]) => manager.getCwd() === cwd && manager.getSessionId() === id)?.[0],
+      [...files].find(
+        ([, manager]) => manager.getCwd() === cwd && manager.getSessionId() === id,
+      )?.[0],
     open: (file: string) => {
       const manager = files.get(file);
       if (!manager) throw new Error("session file missing");
@@ -38,24 +49,52 @@ test("shared Pi executor delegates tool calls through the runtime policy boundar
   let disposed = 0;
   const progress: unknown[] = [];
   const runtime = createStatelessSubpolarRuntime({
-    context: { async load() { return { requestId: "request", principal: { id: "local", kind: "local" } }; } },
-    gateway: createPolicyGateway({
-      tools: [{ id: "denied", namespace: "test", description: "Denied", inputSchema: {}, enabled: true, risk: "high" }],
-      resolvePolicy: () => ({ deny: true }),
-      execute: async () => { executions++; return { ok: true, value: "unsafe" }; },
-    }),
-    executor: createPiStatelessExecutor(() => ({
-      async execute(input) {
-        expect(input.transcript.entries).toEqual([{ role: "user", content: "prior" }]);
-        const result = await input.tools!.call({ callId: "call", toolId: "denied", input: {} });
-        await input.emit({ type: "status", data: "done" });
-        return result;
+    context: {
+      async load() {
+        return { requestId: "request", principal: { id: "local", kind: "local" } };
       },
-      dispose() { disposed++; },
-    }), undefined, () => [{ role: "user", content: "prior" }]),
-    eventSink: (event) => { progress.push(event.type); },
+    },
+    gateway: createPolicyGateway({
+      tools: [
+        {
+          id: "denied",
+          namespace: "test",
+          description: "Denied",
+          inputSchema: {},
+          enabled: true,
+          risk: "high",
+        },
+      ],
+      resolvePolicy: () => ({ deny: true }),
+      execute: async () => {
+        executions++;
+        return { ok: true, value: "unsafe" };
+      },
+    }),
+    executor: createPiStatelessExecutor(
+      () => ({
+        async execute(input) {
+          expect(input.transcript.entries).toEqual([{ role: "user", content: "prior" }]);
+          const result = await input.tools!.call({ callId: "call", toolId: "denied", input: {} });
+          await input.emit({ type: "status", data: "done" });
+          return result;
+        },
+        dispose() {
+          disposed++;
+        },
+      }),
+      undefined,
+      () => [{ role: "user", content: "prior" }],
+    ),
+    eventSink: (event) => {
+      progress.push(event.type);
+    },
   });
-  expect(await runtime.run(request)).toMatchObject({ state: "completed", output: { ok: false, status: "denied" }, recoverable: false });
+  expect(await runtime.run(request)).toMatchObject({
+    state: "completed",
+    output: { ok: false, status: "denied" },
+    recoverable: false,
+  });
   expect(executions).toBe(0);
   expect(disposed).toBe(1);
   expect(progress).toEqual(["run.started", "run.progress", "run.completed"]);
@@ -73,27 +112,59 @@ test("SDK execution aborts, unsubscribes, and disposes without loading tools or 
     SettingsManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class {
       constructor(options: Record<string, unknown>) {
-        expect(options).toMatchObject({ noExtensions: true, noSkills: true, noPromptTemplates: true, noContextFiles: true });
+        expect(options).toMatchObject({
+          noExtensions: true,
+          noSkills: true,
+          noPromptTemplates: true,
+          noContextFiles: true,
+        });
       }
       async reload() {}
     },
     async createAgentSession(options) {
       expect(options).toMatchObject({ tools: [], noTools: "all" });
-      return { session: {
-        subscribe: () => () => { unsubscribed++; },
-        prompt: () => new Promise<void>((_, reject) => { rejectPrompt = reject; controller.abort(); }),
-        async abort() { aborts++; rejectPrompt?.(new Error("aborted")); },
-        dispose() { disposed++; },
-        messages: [],
-      } };
+      return {
+        session: {
+          subscribe: () => () => {
+            unsubscribed++;
+          },
+          prompt: () =>
+            new Promise<void>((_, reject) => {
+              rejectPrompt = reject;
+              controller.abort();
+            }),
+          async abort() {
+            aborts++;
+            rejectPrompt?.(new Error("aborted"));
+          },
+          dispose() {
+            disposed++;
+          },
+          messages: [],
+        },
+      };
     },
   };
   const runtime = createStatelessSubpolarRuntime({
-    context: { async load() { return { requestId: "request", principal: { id: "local", kind: "local" } }; } },
-    gateway: createPolicyGateway({ tools: [], resolvePolicy: () => ({ deny: true }), execute: async () => ({ ok: true, value: null }) }),
-    executor: createPiStatelessExecutor(createPiSdkExecutorFactory(async () => sdk), undefined),
+    context: {
+      async load() {
+        return { requestId: "request", principal: { id: "local", kind: "local" } };
+      },
+    },
+    gateway: createPolicyGateway({
+      tools: [],
+      resolvePolicy: () => ({ deny: true }),
+      execute: async () => ({ ok: true, value: null }),
+    }),
+    executor: createPiStatelessExecutor(
+      createPiSdkExecutorFactory(async () => sdk),
+      undefined,
+    ),
   });
-  expect(await runtime.run({ ...request, signal: controller.signal })).toMatchObject({ state: "interrupted", recoverable: false });
+  expect(await runtime.run({ ...request, signal: controller.signal })).toMatchObject({
+    state: "interrupted",
+    recoverable: false,
+  });
   expect(aborts).toBe(1);
   expect(unsubscribed).toBe(1);
   expect(disposed).toBe(1);
@@ -108,17 +179,23 @@ test("uses the environment runtime data directory for Pi agent files", async () 
     SessionManager: sessionManagerApi(),
     SettingsManager: { inMemory: () => ({}) },
     DefaultResourceLoader: class {
-      constructor(options: Record<string, unknown>) { loaderOptions = options; }
+      constructor(options: Record<string, unknown>) {
+        loaderOptions = options;
+      }
       async reload() {}
     },
     async createAgentSession() {
-      return { session: {
-        subscribe: () => () => undefined,
-        async prompt() {},
-        async abort() {},
-        dispose() {},
-        messages: [{ role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" }],
-      } };
+      return {
+        session: {
+          subscribe: () => () => undefined,
+          async prompt() {},
+          async abort() {},
+          dispose() {},
+          messages: [
+            { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop" },
+          ],
+        },
+      };
     },
   };
   const execution: PiExecutionRequest = {
@@ -148,16 +225,20 @@ test("persists Pi sessions under runtime data and reopens them by the T3 ACP ses
     getAgentDir: () => "/test/agent",
     SessionManager,
     SettingsManager: { inMemory: () => ({}) },
-    DefaultResourceLoader: class { async reload() {} },
+    DefaultResourceLoader: class {
+      async reload() {}
+    },
     async createAgentSession(options) {
       managerSeen = options.sessionManager as PiSessionManager;
-      return { session: {
-        subscribe: () => () => undefined,
-        async prompt() {},
-        async abort() {},
-        dispose() {},
-        messages: [{ role: "assistant", content: "ok", stopReason: "stop" }],
-      } };
+      return {
+        session: {
+          subscribe: () => () => undefined,
+          async prompt() {},
+          async abort() {},
+          dispose() {},
+          messages: [{ role: "assistant", content: "ok", stopReason: "stop" }],
+        },
+      };
     },
   };
   const nativeId = "native-session-id";
@@ -165,25 +246,39 @@ test("persists Pi sessions under runtime data and reopens them by the T3 ACP ses
     runId: "run-persistent-session",
     requestId: "request-persistent-session",
     prompt: "hello",
-    context: { principal: { id: "owner", kind: "local" }, sessionId: nativeId, cwd: "/workspace/project" },
+    context: {
+      principal: { id: "owner", kind: "local" },
+      sessionId: nativeId,
+      cwd: "/workspace/project",
+    },
     transcript: { entries: [{ role: "user", content: "T3 owns this history" }] },
     emit: () => undefined,
   };
   const factory = createPiSdkExecutorFactory(async () => sdk);
 
   const first = await factory({ runtimeDataDir: "/var/lib/subpolar" }, execution);
-  expect(managerSeen?.getSessionFile()).toBe(`/var/lib/subpolar/sessions/${createHash("sha256").update(nativeId).digest("hex")}.jsonl`);
+  expect(managerSeen?.getSessionFile()).toBe(
+    `/var/lib/subpolar/sessions/${createHash("sha256").update(nativeId).digest("hex")}.jsonl`,
+  );
   await first.execute(execution);
   await first.dispose?.();
 
-  const resumed = await factory({ runtimeDataDir: "/var/lib/subpolar", resumeSessionIds: new Set([nativeId]) }, execution);
+  const resumed = await factory(
+    { runtimeDataDir: "/var/lib/subpolar", resumeSessionIds: new Set([nativeId]) },
+    execution,
+  );
   expect(managerSeen?.getSessionId()).toBe(createHash("sha256").update(nativeId).digest("hex"));
   await resumed.dispose?.();
 
-  await expect(factory({ runtimeDataDir: "/var/lib/subpolar", resumeSessionIds: new Set(["missing"]) }, {
-    ...execution,
-    context: { ...execution.context, sessionId: "missing" },
-  })).rejects.toThrow("Persisted Pi session was not found");
+  await expect(
+    factory(
+      { runtimeDataDir: "/var/lib/subpolar", resumeSessionIds: new Set(["missing"]) },
+      {
+        ...execution,
+        context: { ...execution.context, sessionId: "missing" },
+      },
+    ),
+  ).rejects.toThrow("Persisted Pi session was not found");
 });
 
 test("rejects relative Pi runtime data directories before creating a session file", async () => {
@@ -191,20 +286,29 @@ test("rejects relative Pi runtime data directories before creating a session fil
     getAgentDir: () => "/test/agent",
     SessionManager: sessionManagerApi(),
     SettingsManager: { inMemory: () => ({}) },
-    DefaultResourceLoader: class { async reload() {} },
-    async createAgentSession() { throw new Error("must reject before creating an agent session"); },
+    DefaultResourceLoader: class {
+      async reload() {}
+    },
+    async createAgentSession() {
+      throw new Error("must reject before creating an agent session");
+    },
   };
   const execution: PiExecutionRequest = {
     runId: "run-relative-dir",
     requestId: "request-relative-dir",
     prompt: "hello",
-    context: { principal: { id: "owner", kind: "local" }, sessionId: "session", cwd: "/workspace/project" },
+    context: {
+      principal: { id: "owner", kind: "local" },
+      sessionId: "session",
+      cwd: "/workspace/project",
+    },
     transcript: { entries: [] },
     emit: () => undefined,
   };
 
-  await expect(createPiSdkExecutorFactory(async () => sdk)({ runtimeDataDir: "relative/path" }, execution))
-    .rejects.toThrow("runtime data directory must be an absolute path");
+  await expect(
+    createPiSdkExecutorFactory(async () => sdk)({ runtimeDataDir: "relative/path" }, execution),
+  ).rejects.toThrow("runtime data directory must be an absolute path");
 });
 
 test("SDK exposes only policy-gateway tools and routes calls through the run invoker", async () => {
@@ -215,25 +319,33 @@ test("SDK exposes only policy-gateway tools and routes calls through the run inv
     getAgentDir: () => "/test/agent",
     SessionManager: sessionManagerApi(),
     SettingsManager: { inMemory: () => ({}) },
-    DefaultResourceLoader: class { async reload() {} },
+    DefaultResourceLoader: class {
+      async reload() {}
+    },
     async createAgentSession(options) {
       optionsSeen = options;
-      return { session: {
-        subscribe: () => () => undefined,
-        async prompt() {
-          const tools = options.customTools as Array<{
-            name: string;
-            parameters: Record<string, unknown>;
-            execute(id: string, params: unknown): Promise<unknown>;
-          }>;
-          const toolResult = await tools[0]!.execute("call-1", { text: "hello" });
-          observedCalls.push(toolResult);
-          messages.push({ role: "assistant", content: [{ type: "text", text: "tool finished" }], stopReason: "stop" });
+      return {
+        session: {
+          subscribe: () => () => undefined,
+          async prompt() {
+            const tools = options.customTools as Array<{
+              name: string;
+              parameters: Record<string, unknown>;
+              execute(id: string, params: unknown): Promise<unknown>;
+            }>;
+            const toolResult = await tools[0]!.execute("call-1", { text: "hello" });
+            observedCalls.push(toolResult);
+            messages.push({
+              role: "assistant",
+              content: [{ type: "text", text: "tool finished" }],
+              stopReason: "stop",
+            });
+          },
+          async abort() {},
+          dispose() {},
+          messages,
         },
-        async abort() {},
-        dispose() {},
-        messages,
-      } };
+      };
     },
   };
   const execution: PiExecutionRequest = {
@@ -242,19 +354,27 @@ test("SDK exposes only policy-gateway tools and routes calls through the run inv
     prompt: "use the tool",
     context: { principal: { id: "owner-1", kind: "local" }, sessionId: "session-1" },
     transcript: { entries: [] },
-    toolDefinitions: [{
-      id: "test.echo",
-      namespace: "test",
-      description: "Echo text",
-      inputSchema: {},
-      enabled: true,
-      risk: "low",
-    }],
+    toolDefinitions: [
+      {
+        id: "test.echo",
+        namespace: "test",
+        description: "Echo text",
+        inputSchema: {},
+        enabled: true,
+        risk: "low",
+      },
+    ],
     emit: () => undefined,
     tools: {
       async call(call) {
         observedCalls.push(call);
-        return { ok: true, status: "executed", callId: call.callId, toolId: call.toolId, value: { accepted: true } };
+        return {
+          ok: true,
+          status: "executed",
+          callId: call.callId,
+          toolId: call.toolId,
+          value: { accepted: true },
+        };
       },
     },
   };
@@ -262,7 +382,10 @@ test("SDK exposes only policy-gateway tools and routes calls through the run inv
   const executor = await createPiSdkExecutorFactory(async () => sdk)(undefined, execution);
   const result = await executor.execute(execution);
 
-  expect(optionsSeen).toMatchObject({ noTools: "builtin", tools: [expect.stringMatching(/^subpolar_[a-f0-9]{16}$/)] });
+  expect(optionsSeen).toMatchObject({
+    noTools: "builtin",
+    tools: [expect.stringMatching(/^subpolar_[a-f0-9]{16}$/)],
+  });
   const customTools = optionsSeen?.customTools as Array<{ parameters: Record<string, unknown> }>;
   expect(customTools[0]?.parameters).toEqual({});
   expect(observedCalls[0]).toMatchObject({
@@ -278,4 +401,56 @@ test("SDK exposes only policy-gateway tools and routes calls through the run inv
   });
   expect(result).toEqual({ text: "tool finished" });
   await executor.dispose?.();
+});
+
+test("SDK applies configured thinking and appends instructions without changing defaults", async () => {
+  const sessionOptions: Record<string, unknown>[] = [];
+  const loaderOptions: Record<string, unknown>[] = [];
+  const sdk: PiSdkModule = {
+    getAgentDir: () => "/test/agent",
+    SessionManager: sessionManagerApi(),
+    SettingsManager: { inMemory: () => ({}) },
+    DefaultResourceLoader: class {
+      constructor(options: Record<string, unknown>) {
+        loaderOptions.push(options);
+      }
+      async reload() {}
+    },
+    async createAgentSession(options) {
+      sessionOptions.push(options);
+      return {
+        session: {
+          subscribe: () => () => undefined,
+          async prompt() {},
+          async abort() {},
+          dispose() {},
+          messages: [],
+        },
+      };
+    },
+  };
+  const execution: PiExecutionRequest = {
+    runId: "run-profile",
+    requestId: "request-profile",
+    prompt: "hello",
+    context: { principal: { id: "owner", kind: "local" } },
+    transcript: { entries: [] },
+    emit: () => undefined,
+  };
+  const factory = createPiSdkExecutorFactory(async () => sdk);
+
+  const configured = await factory(
+    { thinkingLevel: "high", instructions: "Use project conventions." },
+    execution,
+  );
+  expect(sessionOptions[0]).toMatchObject({ thinkingLevel: "high" });
+  expect((loaderOptions[0]?.systemPromptOverride as (base: string) => string)("base prompt")).toBe(
+    "base prompt\n\nUse project conventions.",
+  );
+  await configured.dispose?.();
+
+  const defaults = await factory(undefined, execution);
+  expect(sessionOptions[1]).not.toHaveProperty("thinkingLevel");
+  expect(loaderOptions[1]).not.toHaveProperty("systemPromptOverride");
+  await defaults.dispose?.();
 });

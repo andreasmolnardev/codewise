@@ -158,6 +158,9 @@ const fixture = Effect.fn("fixture")(function* (
       ServerSettings.ServerSettingsService,
       ServerSettings.ServerSettingsService.of({
         updateProviderInstance: () => Effect.die("Unexpected provider mutation"),
+        listProviderInstanceMcpServers: () => Effect.succeed([]),
+        putProviderInstanceMcpServer: () => Effect.die("Unexpected MCP server mutation"),
+        removeProviderInstanceMcpServer: () => Effect.die("Unexpected MCP server mutation"),
         withSettingsSnapshot: (use) => Effect.flatMap(Ref.get(settings), use),
         start: Effect.void,
         ready: Effect.void,

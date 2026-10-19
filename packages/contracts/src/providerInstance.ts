@@ -46,6 +46,25 @@ export type ProviderInstanceEnvironmentVariable = typeof ProviderInstanceEnviron
 export const ProviderInstanceEnvironment = Schema.Array(ProviderInstanceEnvironmentVariable);
 export type ProviderInstanceEnvironment = typeof ProviderInstanceEnvironment.Type;
 
+/** A remote MCP server configured for one provider instance. Credentials are references to
+ * that instance's environment variables; secret values are never stored here. */
+export const ProviderInstanceMcpServerConfig = Schema.Struct({
+  id: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(64),
+    Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]*$/),
+  ),
+  url: TrimmedNonEmptyString,
+  headers: Schema.optionalKey(
+    Schema.Record(
+      TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+      Schema.Struct({ env: ProviderInstanceEnvironmentVariableName }),
+    ),
+  ),
+  namespace: Schema.optional(TrimmedNonEmptyString),
+  timeoutMs: Schema.optional(Schema.Int.check(Schema.isBetween({ minimum: 100, maximum: 15_000 }))),
+});
+export type ProviderInstanceMcpServerConfig = typeof ProviderInstanceMcpServerConfig.Type;
+
 /**
  * The driver-specific config payload is left as `Schema.Unknown`; each driver
  * registers its own decoder with the runtime registry, and envelopes for
