@@ -4,6 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import {
   createEnvironmentManager,
+  type EnvironmentRegistration,
+  type EnvironmentRegistrationStore,
 } from "../src/index.ts";
 import {
   createDockerEnvironmentBackend,
@@ -77,6 +79,7 @@ class FakeDockerClient implements DockerClient {
   readonly managedSessionCalls: Array<{ id: string; request: DockerContainerManagedSessionRequest }> = [];
   readonly imageBuildCalls: DockerImageBuildRequest[] = [];
   readonly pulledImages: string[] = [];
+  readonly stopFailures = new Set<string>();
   wrongOwner = false;
 
   async inspectContainer(name: string) {
@@ -133,6 +136,8 @@ class FakeDockerClient implements DockerClient {
   async stopContainer(id: string, options: { readonly timeoutSeconds: 10 }) {
     expect(options.timeoutSeconds).toBe(10);
     this.stopCalls.push(id);
+    const containerName = [...this.containers.entries()].find(([, container]) => container.id === id)?.[0];
+    if (containerName && this.stopFailures.has(containerName)) throw new Error(`Could not stop ${containerName}`);
     this.update(id, { state: "exited" });
   }
 
@@ -762,7 +767,7 @@ describe("Docker environment backend", () => {
       [{ privileged: true }, /privileged/],
       [{ capAdd: ["SYS_ADMIN"] }, /capAdd/],
       [{ runArgs: ["--privileged"] }, /runArgs/],
-      [{ forwardPorts: [3000] }, /forwardPorts/],
+      [{ appPort: ["3000:3000"] }, /appPort/],
     ] as const;
     for (const [configuration, message] of unsupportedConfigurations) {
       const { client, identity, backend } = await fixture();
@@ -783,6 +788,44 @@ describe("Docker environment backend", () => {
       expect(message.test((failure as Error).message)).toBe(true);
       expect(client.createCalls).toEqual([]);
       expect(client.imageBuildCalls).toEqual([]);
+    }
+  });
+
+  test("reports validated forwardPorts metadata without publishing Docker host ports", async () => {
+    const { client, backend, request, identity } = await fixture();
+    await mkdir(path.join(identity.worktreePath, ".devcontainer"), { recursive: true });
+    await Bun.write(path.join(identity.worktreePath, ".devcontainer", "devcontainer.json"), JSON.stringify({
+      image: "project:latest",
+      forwardPorts: [3000, "8443"],
+    }));
+
+    const registrations: EnvironmentRegistration[] = [];
+    const store: EnvironmentRegistrationStore = {
+      async loadAll() { return registrations; },
+      async save(environment, createdAt, updatedAt) {
+        const index = registrations.findIndex((entry) => entry.environment.id === environment.id);
+        const registration = { environment, createdAt, updatedAt };
+        if (index < 0) registrations.push(registration);
+        else registrations[index] = registration;
+      },
+      async remove(environmentId) {
+        const index = registrations.findIndex((entry) => entry.environment.id === environmentId);
+        if (index >= 0) registrations.splice(index, 1);
+      },
+    };
+    const manager = createEnvironmentManager(backend, store);
+    const environment = await manager.ensure(request);
+    expect(environment.forwardedPorts).toEqual([3000, 8443]);
+    expect(registrations.find((entry) => entry.environment.id === identity.id)?.environment.forwardedPorts).toEqual([3000, 8443]);
+    expect(client.createCalls[0]).not.toHaveProperty("portBindings");
+    expect(client.createCalls[0]).not.toHaveProperty("hostPorts");
+
+    for (const forwardPorts of [3000, [0], [65536], ["3000:3000"], [3000, "3000"], Array.from({ length: 33 }, (_, index) => index + 1)]) {
+      const { backend, identity: invalidIdentity, client: invalidClient } = await fixture();
+      await mkdir(path.join(invalidIdentity.worktreePath, ".devcontainer"), { recursive: true });
+      await Bun.write(path.join(invalidIdentity.worktreePath, ".devcontainer", "devcontainer.json"), JSON.stringify({ image: "project:latest", forwardPorts }));
+      await expect(backend.inspectForLifecycle!(invalidIdentity)).rejects.toMatchObject({ code: "DEV_CONTAINER_CONFIGURATION_INVALID" });
+      expect(invalidClient.createCalls).toEqual([]);
     }
   });
 
@@ -841,6 +884,74 @@ describe("Docker environment backend", () => {
     expect(client.volumes.has(databaseOptions.mounts[0]!.source)).toBe(false);
   });
 
+  test("manages an optional Redis sidecar with PostgreSQL on the same internal network", async () => {
+    const { client, manager, request, identity } = await fixture({ allowDevContainerCompose: true });
+    const directory = path.join(identity.worktreePath, ".devcontainer");
+    await mkdir(directory, { recursive: true });
+    await Promise.all([
+      Bun.write(path.join(directory, "devcontainer.json"), JSON.stringify({
+        dockerComposeFile: "compose.yaml",
+        service: "app",
+        runServices: ["app", "db", "cache"],
+        forwardPorts: [3000],
+      })),
+      Bun.write(path.join(directory, "compose.yaml"), [
+        "services:",
+        "  app:",
+        "    image: subpolar/worker:1.0",
+        "    depends_on:",
+        "      - db",
+        "      - cache",
+        "  db:",
+        "    image: postgres:16",
+        "    environment:",
+        "      POSTGRES_PASSWORD: local-test-password",
+        "  cache:",
+        "    image: redis:7",
+        "    healthcheck:",
+        "      test: [CMD, redis-cli, ping]",
+      ].join("\n")),
+    ]);
+
+    const environment = await manager.ensure(request);
+    expect(environment.forwardedPorts).toEqual([3000]);
+    expect(client.createCalls).toHaveLength(3);
+    const database = client.createCalls.find((call) => call.name.endsWith("-db"))!;
+    const redis = client.createCalls.find((call) => call.name.endsWith("-redis"))!;
+    const worker = client.createCalls.find((call) => call.name === `subpolar-${identity.id}`)!;
+    expect(redis).toMatchObject({
+      image: "redis:7",
+      user: "999:999",
+      privileged: false,
+      readOnlyRootfs: true,
+      networkMode: database.networkMode,
+      networkAliases: ["cache"],
+      mounts: [],
+      environment: {},
+      healthcheck: { test: ["CMD", "redis-cli", "ping"] },
+      tmpfs: { "/data": "rw,nosuid,nodev,size=64m,uid=999,gid=999" },
+    });
+    expect(worker.networkMode).toBe(redis.networkMode);
+    expect(client.pulledImages).toEqual(["postgres:16", "redis:7"]);
+    expect(client.networks.get(redis.networkMode)?.internal).toBe(true);
+    expect(client.startCalls).toEqual([
+      client.containers.get(database.name)?.id,
+      client.containers.get(redis.name)?.id,
+      client.containers.get(worker.name)?.id,
+    ]);
+
+    await manager.stop(request);
+    expect(client.stopCalls).toEqual([
+      client.containers.get(worker.name)?.id,
+      client.containers.get(database.name)?.id,
+      client.containers.get(redis.name)?.id,
+    ]);
+    await manager.remove(request);
+    expect(client.networks.has(redis.networkMode)).toBe(false);
+    expect(client.containers.has(redis.name)).toBe(false);
+    expect(client.volumes.has(`${redis.name}-data`)).toBe(false);
+  });
+
   test("stops the PostgreSQL sidecar when Compose app setup fails", async () => {
     const { client, backend, identity } = await fixture({ allowDevContainerCompose: true });
     const directory = path.join(identity.worktreePath, ".devcontainer");
@@ -880,6 +991,51 @@ describe("Docker environment backend", () => {
     expect(client.networks.has(database.networkMode)).toBe(true);
   });
 
+  test("attempts PostgreSQL cleanup even when stopping Redis fails", async () => {
+    const { client, backend, identity } = await fixture({ allowDevContainerCompose: true });
+    const directory = path.join(identity.worktreePath, ".devcontainer");
+    await mkdir(directory, { recursive: true });
+    await Promise.all([
+      Bun.write(path.join(directory, "devcontainer.json"), JSON.stringify({
+        dockerComposeFile: "compose.yaml",
+        service: "app",
+        postCreateCommand: "./setup.sh",
+      })),
+      Bun.write(path.join(directory, "compose.yaml"), [
+        "services:",
+        "  app:",
+        "    image: subpolar/worker:1.0",
+        "    depends_on:",
+        "      - db",
+        "      - cache",
+        "  db:",
+        "    image: postgres:16",
+        "    environment:",
+        "      POSTGRES_PASSWORD: local-test-password",
+        "  cache:",
+        "    image: redis:7",
+      ].join("\n")),
+    ]);
+    client.processExitCodes.push(9);
+
+    const created = await backend.create(identity);
+    const database = client.createCalls.find((call) => call.name.endsWith("-db"))!;
+    const redis = client.createCalls.find((call) => call.name.endsWith("-redis"))!;
+    const worker = client.createCalls.find((call) => call.name === `subpolar-${identity.id}`)!;
+    client.stopFailures.add(redis.name);
+
+    await expect(backend.start(created)).rejects.toMatchObject({ code: "DEV_CONTAINER_SETUP_FAILED" });
+
+    expect(client.stopCalls).toEqual([
+      client.containers.get(redis.name)?.id,
+      client.containers.get(database.name)?.id,
+      client.containers.get(worker.name)?.id,
+    ]);
+    expect(client.containers.get(database.name)?.state).toBe("exited");
+    expect(client.containers.get(redis.name)?.state).toBe("running");
+    expect(client.containers.get(worker.name)?.state).toBe("exited");
+  });
+
   test("rejects Compose by default before creating Docker resources", async () => {
     const { client, backend, identity } = await fixture();
     const directory = path.join(identity.worktreePath, ".devcontainer");
@@ -903,6 +1059,11 @@ describe("Docker environment backend", () => {
       "services:\n  app:\n    image: project:latest\n    ports: ['3000:3000']\n",
       "services:\n  app:\n    image: project:latest\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: secret\n    volumes:\n      - /tmp/db:/var/lib/postgresql/data\n",
       "services:\n  app:\n    image: project:latest\n  db:\n    image: postgres:16\n    environment:\n      POSTGRES_PASSWORD: ${DB_PASSWORD}\n    volumes:\n      - subpolar-data:/var/lib/postgresql/data\nvolumes:\n  subpolar-data: {}\n",
+      "services:\n  app:\n    image: project:latest\n  cache:\n    image: redis:7\n    ports: ['6379:6379']\n",
+      "services:\n  app:\n    image: project:latest\n  cache:\n    image: redis:7\n    volumes: ['/tmp/cache:/data']\n",
+      "services:\n  app:\n    image: project:latest\n  cache:\n    image: redis:7\n    environment:\n      REDIS_ARGS: '--protected-mode no'\n",
+      "services:\n  app:\n    image: project:latest\n  cache:\n    image: redis:7\n    healthcheck:\n      test: [CMD, redis-cli, ping]\n      interval: 2s\n",
+      "services:\n  app:\n    image: project:latest\n  cache:\n    image: attacker.example/redis:latest\n",
     ];
     for (const composeSource of invalidFiles) {
       const { client, backend, identity } = await fixture({ allowDevContainerCompose: true });

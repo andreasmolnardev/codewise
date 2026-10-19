@@ -142,6 +142,9 @@ export class SubpolarRuntimeHost {
   /** Restore a native session key after the ACP layer has validated durable Pi state. */
   restoreSession(sessionId: string, principal?: Principal): RuntimeHostSession {
     if (!sessionId) throw new Error("Runtime session ID is required");
+    if (!this.capabilities.supports["session.resume"]) {
+      throw new Error("Runtime host cannot resume sessions without persistent executor storage");
+    }
     const existing = this.sessions.get(sessionId);
     if (existing) return { sessionId, capabilities: this.capabilities };
     this.sessions.set(sessionId, { id: sessionId, principal, transcript: [] });

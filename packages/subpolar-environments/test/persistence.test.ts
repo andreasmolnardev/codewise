@@ -107,3 +107,26 @@ test("reconciliation reports a missing container and preserves its registration"
   expect(backend.creates).toBe(1);
   expect(await createFileEnvironmentRegistrationStore(file).loadAll()).toHaveLength(1);
 });
+
+test("reconciliation rejects a replacement Docker resource with the same environment identity", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "subpolar-replaced-resource-"));
+  roots.push(root);
+  const worktree = path.join(root, "workspace");
+  await mkdir(worktree);
+  const request = { ownerId: "owner", workspaceId: "workspace", storageRoot: root, worktreePath: worktree };
+  const file = path.join(root, "state", "environments.json");
+  const backend = new Backend();
+  const manager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const registered = await manager.ensure(request);
+  backend.records.set(registered.id, { ...registered, resourceId: "replacement-resource" });
+
+  const restartedManager = createEnvironmentManager(backend, createFileEnvironmentRegistrationStore(file));
+  const [result] = await restartedManager.reconcile();
+
+  expect(result).toMatchObject({
+    environmentId: registered.id,
+    error: { code: "OWNERSHIP_MISMATCH", message: expect.stringContaining("resource") },
+  });
+  expect((await createFileEnvironmentRegistrationStore(file).loadAll())[0]?.environment.resourceId)
+    .toBe(registered.resourceId);
+});

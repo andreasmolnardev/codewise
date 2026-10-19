@@ -138,7 +138,7 @@ export interface DockerContainerCreateOptions {
   readonly tmpfs: Readonly<Record<string, string>>;
   readonly environment: Readonly<Record<string, string>>;
   readonly healthcheck?: {
-    readonly test: readonly ["CMD", "pg_isready"];
+    readonly test: readonly ["CMD", "pg_isready"] | readonly ["CMD", "redis-cli", "ping"];
     readonly intervalMs: number;
     readonly timeoutMs: number;
     readonly retries: number;
@@ -252,6 +252,7 @@ const ENVIRONMENT = Object.freeze({ ...LEGACY_ENVIRONMENT, SUBPOLAR_RUNTIME_DATA
 
 interface ResolvedDevContainerConfiguration {
   readonly image: string;
+  readonly forwardedPorts: readonly number[];
   readonly build?: DockerImageBuildRequest;
   readonly containerEnvironment: Readonly<Record<string, string>>;
   readonly workspaceMountTarget?: string;
@@ -266,9 +267,12 @@ interface ResolvedComposeConfiguration {
   readonly databaseService: string;
   readonly databaseImage: string;
   readonly databaseEnvironment: Readonly<Record<string, string>>;
+  readonly redisService: string;
+  readonly redisImage: string;
   readonly networkName: string;
   readonly databaseName: string;
   readonly databaseVolumeName: string;
+  readonly redisName: string;
 }
 
 function workspaceMount(value: unknown, configuration: string, containerStorageRoot: string): string | undefined {
@@ -453,6 +457,24 @@ function composeEnvironment(value: unknown, detail: string, allowedKeys?: readon
   return result;
 }
 
+function parseForwardedPorts(value: unknown, configuration: string): readonly number[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > 32) {
+    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${configuration} forwardPorts must be a list of at most 32 ports`);
+  }
+  const ports = value.map((entry) => {
+    const port = typeof entry === "number" ? entry : typeof entry === "string" && /^\d{1,5}$/.test(entry) ? Number(entry) : NaN;
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${configuration} forwardPorts entries must be TCP ports from 1 to 65535`);
+    }
+    return port;
+  });
+  if (new Set(ports).size !== ports.length) {
+    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${configuration} forwardPorts entries must be unique`);
+  }
+  return ports;
+}
+
 async function resolveComposeConfiguration(
   identity: EnvironmentIdentity,
   config: DockerEnvironmentConfig,
@@ -509,11 +531,25 @@ async function resolveComposeConfiguration(
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${configuration} runServices must be a list of service names`);
   }
   const serviceNames = Object.keys(services);
-  if (serviceNames.length < 1 || serviceNames.length > 2 || serviceNames.some((name) => !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(name))) {
-    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} supports one app service and at most one PostgreSQL service`);
+  if (serviceNames.length < 1 || serviceNames.length > 3 || serviceNames.some((name) => !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$/.test(name))) {
+    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} supports one app service, one PostgreSQL service, and one Redis service`);
   }
-  const databaseService = serviceNames.find((name) => name !== service);
-  let database: Omit<ResolvedComposeConfiguration, "service" | "networkName" | "databaseName" | "databaseVolumeName"> | undefined;
+  const sidecarServices = serviceNames.filter((name) => name !== service);
+  let databaseService: string | undefined;
+  let redisService: string | undefined;
+  for (const name of sidecarServices) {
+    const candidate = objectRecord(services[name], `${configuration} Compose service ${name}`);
+    if (typeof candidate.image === "string" && /^postgres(?::[A-Za-z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$/.test(candidate.image)) {
+      if (databaseService !== undefined) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} supports only one PostgreSQL sidecar`);
+      databaseService = name;
+    } else if (typeof candidate.image === "string" && /^redis(?::[A-Za-z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$/.test(candidate.image)) {
+      if (redisService !== undefined) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} supports only one Redis sidecar`);
+      redisService = name;
+    } else {
+      throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} sidecars must use PostgreSQL or Redis images`);
+    }
+  }
+  let database: Pick<ResolvedComposeConfiguration, "databaseService" | "databaseImage" | "databaseEnvironment"> | undefined;
   if (databaseService !== undefined) {
     const candidate = objectRecord(services[databaseService], `${configuration} Compose service ${databaseService}`);
     const candidateKeys = Object.keys(candidate);
@@ -551,11 +587,40 @@ async function resolveComposeConfiguration(
     }
     database = { databaseService, databaseImage: candidate.image, databaseEnvironment };
   }
-  const allowedRunServices = databaseService === undefined ? [service] : [service, databaseService];
+  let redis: Pick<ResolvedComposeConfiguration, "redisService" | "redisImage"> | undefined;
+  if (redisService !== undefined) {
+    const candidate = objectRecord(services[redisService], `${configuration} Compose Redis service`);
+    if (Object.keys(candidate).some((key) => !["image", "healthcheck"].includes(key)) ||
+        typeof candidate.image !== "string" || !/^redis(?::[A-Za-z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$/.test(candidate.image)) {
+      throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} Redis service supports only an approved redis image and healthcheck`);
+    }
+    if (candidate.healthcheck !== undefined) {
+      const healthcheck = objectRecord(candidate.healthcheck, `${configuration} Redis healthcheck`);
+      if (Object.keys(healthcheck).some((key) => key !== "test") ||
+          !Array.isArray(healthcheck.test) || healthcheck.test.length !== 3 || healthcheck.test[0] !== "CMD" || healthcheck.test[1] !== "redis-cli" || healthcheck.test[2] !== "ping") {
+        throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} Redis healthcheck supports only test: [CMD, redis-cli, ping]`);
+      }
+    }
+    const dependsOn = app.depends_on;
+    const dependsOnNames = Array.isArray(dependsOn) ? dependsOn : typeof dependsOn === "object" && dependsOn !== null ? Object.keys(dependsOn) : [];
+    if (!dependsOnNames.includes(redisService)) {
+      throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${configuration} app service must depend on its Redis service`);
+    }
+    redis = { redisService, redisImage: candidate.image };
+  }
+  const allowedRunServices = [service, ...(databaseService === undefined ? [] : [databaseService]), ...(redisService === undefined ? [] : [redisService])];
+  const appDependsOn = app.depends_on;
+  const appDependencyNames = Array.isArray(appDependsOn)
+    ? appDependsOn
+    : typeof appDependsOn === "object" && appDependsOn !== null ? Object.keys(appDependsOn) : [];
+  if (appDependencyNames.some((name) => typeof name !== "string" || !allowedRunServices.includes(name))) {
+    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} app service may depend only on the selected app and managed sidecars`);
+  }
   if (Array.isArray(runServices) && (!runServices.includes(service) ||
       (databaseService !== undefined && !runServices.includes(databaseService)) ||
+      (redisService !== undefined && !runServices.includes(redisService)) ||
       runServices.some((name) => typeof name !== "string" || !allowedRunServices.includes(name)))) {
-    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} runServices may include only the selected app and its PostgreSQL dependency`);
+    throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} runServices may include only the selected app and its managed sidecars`);
   }
   if (Object.keys(app).some((key) => !["image", "build", "environment", "depends_on", "volumes"].includes(key))) {
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${configuration} selected Compose service has unsupported options`);
@@ -610,9 +675,12 @@ async function resolveComposeConfiguration(
     databaseService: database?.databaseService ?? "",
     databaseImage: database?.databaseImage ?? "",
     databaseEnvironment: database?.databaseEnvironment ?? {},
+    redisService: redis?.redisService ?? "",
+    redisImage: redis?.redisImage ?? "",
     networkName: `subpolar-net-${hash(identity.id).slice(0, 20)}`,
     databaseName: `${containerName(identity.id)}-db`,
     databaseVolumeName: `${containerName(identity.id)}-pgdata`,
+    redisName: `${containerName(identity.id)}-redis`,
   };
   void workspaceMountTarget;
   return { image, ...(build === undefined ? {} : { build }), environment, compose };
@@ -641,7 +709,7 @@ async function resolveDevContainerConfiguration(
     }
   } catch { /* No .devcontainer directory. */ }
 
-  if (candidates.length === 0) return { image: config.image, containerEnvironment: {} };
+  if (candidates.length === 0) return { image: config.image, forwardedPorts: [], containerEnvironment: {} };
   const selected = config.defaultDevContainerConfiguration
     ? candidates.find((candidate) => candidate === config.defaultDevContainerConfiguration)
     : candidates.length === 1 ? candidates[0] : undefined;
@@ -674,6 +742,7 @@ async function resolveDevContainerConfiguration(
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${selected} must contain a JSON object`);
   }
   const value = parsed as Record<string, unknown>;
+  const forwardedPorts = parseForwardedPorts(value.forwardPorts, selected);
   const supportedOrChecked = [
     "$schema", "name", "image", "build", "containerEnv", "workspaceMount", "workspaceFolder",
     "postCreateCommand", "postStartCommand", "features", "dockerComposeFile", "service", "runServices",
@@ -730,7 +799,7 @@ async function resolveDevContainerConfiguration(
   if (composeRequested && config.allowDevContainerCompose !== true) {
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Dev Container Compose is disabled by the manager; set SUBPOLAR_ENABLE_DEVCONTAINER_COMPOSE=true to enable it");
   }
-  const guardedRuntimeOptions = ["mounts", "forwardPorts", "appPort", "portsAttributes", "otherPortsAttributes", "privileged", "capAdd", "securityOpt", "runArgs"]
+  const guardedRuntimeOptions = ["mounts", "appPort", "portsAttributes", "otherPortsAttributes", "privileged", "capAdd", "securityOpt", "runArgs"]
     .filter((key) => value[key] !== undefined);
   if (featureEntries.length > 0 && composeRequested) {
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", `${selected} cannot combine Features with a Compose environment`);
@@ -835,6 +904,7 @@ async function resolveDevContainerConfiguration(
     };
     return {
       image,
+      forwardedPorts,
       build: featureBuild,
       containerEnvironment,
       ...(workspaceMountTarget === undefined ? {} : { workspaceMountTarget }),
@@ -846,7 +916,7 @@ async function resolveDevContainerConfiguration(
   if (composeRequested && (value.dockerComposeFile === undefined || value.service === undefined || value.image !== undefined || value.build !== undefined)) {
     throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", `${selected} Compose configuration requires dockerComposeFile and service and cannot also specify image or build`);
   }
-  const unsupportedRuntimeOptions = ["mounts", "forwardPorts", "appPort", "portsAttributes", "otherPortsAttributes", "privileged", "capAdd", "securityOpt", "runArgs"]
+  const unsupportedRuntimeOptions = ["mounts", "appPort", "portsAttributes", "otherPortsAttributes", "privileged", "capAdd", "securityOpt", "runArgs"]
     .filter((key) => value[key] !== undefined);
   if (unsupportedRuntimeOptions.length > 0) {
     throw new DockerEnvironmentError(
@@ -859,6 +929,7 @@ async function resolveDevContainerConfiguration(
     : undefined;
   if (composeResolved) return {
     image: composeResolved.image,
+    forwardedPorts,
     ...(composeResolved.build === undefined ? {} : { build: composeResolved.build }),
     containerEnvironment: { ...composeResolved.environment, ...containerEnvironment },
     compose: composeResolved.compose,
@@ -869,6 +940,7 @@ async function resolveDevContainerConfiguration(
   };
   if (value.build === undefined) return {
     image: typeof value.image === "string" ? value.image : config.image,
+    forwardedPorts,
     containerEnvironment,
     ...(workspaceMountTarget === undefined ? {} : { workspaceMountTarget }),
     ...(workspaceDirectory === undefined ? {} : { workspaceFolder: workspaceDirectory }),
@@ -926,7 +998,7 @@ async function resolveDevContainerConfiguration(
   }
   const image = `subpolar-devcontainer:${hash(`${identity.id}\0${selected}\0${realGatewayDockerfile}\0${realGatewayContext}`).slice(0, 32)}`;
   return {
-    image, build: { kind: "dockerfile", contextPath: hostContext, dockerfilePath, image }, containerEnvironment,
+    image, forwardedPorts, build: { kind: "dockerfile", contextPath: hostContext, dockerfilePath, image }, containerEnvironment,
     ...(workspaceMountTarget === undefined ? {} : { workspaceMountTarget }),
     ...(workspaceDirectory === undefined ? {} : { workspaceFolder: workspaceDirectory }),
     ...(postCreateCommand === undefined ? {} : { postCreateCommand }),
@@ -1278,6 +1350,32 @@ export function createDockerEnvironmentBackend(
     };
   };
 
+  const composeRedisOptions = (identity: EnvironmentIdentity, resolved: ResolvedDevContainerConfiguration): DockerContainerCreateOptions => {
+    const compose = resolved.compose;
+    if (!compose || !compose.redisService) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_INVALID", "Compose Redis service is missing");
+    return {
+      name: compose.redisName,
+      image: compose.redisImage,
+      labels: composeLabelsFor(identity, "compose-redis"),
+      user: "999:999",
+      privileged: false,
+      readOnlyRootfs: true,
+      networkMode: compose.networkName,
+      networkAliases: [compose.redisService],
+      capDrop: ["ALL"],
+      securityOpt: ["no-new-privileges:true"],
+      ...limits,
+      mounts: [],
+      tmpfs: {
+        "/tmp": "rw,nosuid,nodev,size=64m",
+        "/run": "rw,nosuid,nodev,size=16m",
+        "/data": "rw,nosuid,nodev,size=64m,uid=999,gid=999",
+      },
+      environment: {},
+      healthcheck: { test: ["CMD", "redis-cli", "ping"], intervalMs: 1000, timeoutMs: 3000, retries: 60, startPeriodMs: 1000 },
+    };
+  };
+
   const verifyComposeNetwork = async (
     identity: EnvironmentIdentity,
     compose: ResolvedComposeConfiguration,
@@ -1324,6 +1422,27 @@ export function createDockerEnvironmentBackend(
     return inspection;
   };
 
+  const verifyComposeRedis = async (identity: EnvironmentIdentity, resolved: ResolvedDevContainerConfiguration): Promise<DockerContainerInspection | null> => {
+    const compose = resolved.compose;
+    if (!compose?.redisService) return null;
+    const inspection = await client.inspectContainer(compose.redisName);
+    if (!inspection) return null;
+    const expectedOptions = composeRedisOptions(identity, resolved);
+    const expectedLabels = composeLabelsFor(identity, "compose-redis");
+    const observed = inspection.config;
+    const labelsMatch = sameRecord(Object.fromEntries(Object.entries(inspection.labels).filter((entry): entry is [string, string] => typeof entry[1] === "string")), expectedLabels);
+    if (inspection.name !== compose.redisName || inspection.id.length === 0 || !labelsMatch ||
+        observed.image !== compose.redisImage || observed.user !== expectedOptions.user || observed.privileged ||
+        !observed.readOnlyRootfs || observed.networkMode !== compose.networkName ||
+        observed.capDrop.length !== 1 || observed.capDrop[0] !== "ALL" ||
+        observed.securityOpt.length !== 1 || observed.securityOpt[0] !== "no-new-privileges:true" ||
+        observed.memoryBytes !== limits.memoryBytes || observed.nanoCpus !== limits.nanoCpus || observed.pidsLimit !== limits.pidsLimit ||
+        observed.mounts.length !== 0 || !sameRecord(observed.tmpfs, expectedOptions.tmpfs) || Object.keys(observed.environment).length !== 0) {
+      throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Redis sidecar does not match the isolated managed configuration");
+    }
+    return inspection;
+  };
+
   const ensureComposeResources = async (identity: EnvironmentIdentity, resolved: ResolvedDevContainerConfiguration): Promise<void> => {
     const compose = resolved.compose;
     if (!compose) return;
@@ -1340,25 +1459,36 @@ export function createDockerEnvironmentBackend(
         throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Created Compose network could not be verified");
       }
     }
-    if (!compose.databaseService) return;
-    const volume = await client.inspectVolume(compose.databaseVolumeName);
-    const expectedVolumeLabels = composeLabelsFor(identity, "compose-postgres-data");
-    if (volume) {
-      if (volume.name !== compose.databaseVolumeName || volume.driver !== "local" ||
-          !sameRecord(Object.fromEntries(Object.entries(volume.labels).filter((entry): entry is [string, string] => typeof entry[1] === "string")), expectedVolumeLabels)) {
-        throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "PostgreSQL data volume name is already owned by another environment");
+    if (compose.databaseService) {
+      const volume = await client.inspectVolume(compose.databaseVolumeName);
+      const expectedVolumeLabels = composeLabelsFor(identity, "compose-postgres-data");
+      if (volume) {
+        if (volume.name !== compose.databaseVolumeName || volume.driver !== "local" ||
+            !sameRecord(Object.fromEntries(Object.entries(volume.labels).filter((entry): entry is [string, string] => typeof entry[1] === "string")), expectedVolumeLabels)) {
+          throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "PostgreSQL data volume name is already owned by another environment");
+        }
+      } else {
+        await client.createVolume({ name: compose.databaseVolumeName, driver: "local", labels: expectedVolumeLabels });
       }
-    } else {
-      await client.createVolume({ name: compose.databaseVolumeName, driver: "local", labels: expectedVolumeLabels });
+      const database = await verifyComposeDatabase(identity, resolved);
+      if (!database) {
+        if (!client.pullImage) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client does not support pulling the Compose PostgreSQL image");
+        await client.pullImage(compose.databaseImage);
+        const created = await client.createContainer(composeDatabaseOptions(identity, resolved));
+        const inspected = await verifyComposeDatabase(identity, resolved);
+        if (!inspected || inspected.id !== created.id) {
+          throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Created PostgreSQL sidecar could not be verified by its stable identity");
+        }
+      }
     }
-    const database = await verifyComposeDatabase(identity, resolved);
-    if (database) return;
-    if (!client.pullImage) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client does not support pulling the Compose PostgreSQL image");
-    await client.pullImage(compose.databaseImage);
-    const created = await client.createContainer(composeDatabaseOptions(identity, resolved));
-    const inspected = await verifyComposeDatabase(identity, resolved);
-    if (!inspected || inspected.id !== created.id) {
-      throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Created PostgreSQL sidecar could not be verified by its stable identity");
+    if (compose.redisService && !(await verifyComposeRedis(identity, resolved))) {
+      if (!client.pullImage) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client does not support pulling the Compose Redis image");
+      await client.pullImage(compose.redisImage);
+      const created = await client.createContainer(composeRedisOptions(identity, resolved));
+      const inspected = await verifyComposeRedis(identity, resolved);
+      if (!inspected || inspected.id !== created.id) {
+        throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Created Redis sidecar could not be verified by its stable identity");
+      }
     }
   };
 
@@ -1384,7 +1514,7 @@ export function createDockerEnvironmentBackend(
     if (!safeConfiguration) {
       throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Docker container configuration does not match the required isolation settings");
     }
-    return { ...identity, backendId, resourceId: inspection.id, status: status(inspection.state) };
+    return { ...identity, backendId, resourceId: inspection.id, status: status(inspection.state), forwardedPorts: resolved.forwardedPorts };
   };
 
   const legacyRecordFor = (
@@ -1451,9 +1581,12 @@ export function createDockerEnvironmentBackend(
     if (resolved.compose) {
       const database = await verifyComposeDatabase(identity, resolved);
       if (resolved.compose.databaseService && !database) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose PostgreSQL sidecar is missing");
+      const redis = await verifyComposeRedis(identity, resolved);
+      if (resolved.compose.redisService && !redis) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose Redis sidecar is missing");
       await verifyComposeNetwork(identity, resolved.compose, inspection.state === "running" ? [
         { inspection, alias: resolved.compose.service },
         ...(database ? [{ inspection: database, alias: resolved.compose.databaseService }] : []),
+        ...(redis ? [{ inspection: redis, alias: resolved.compose.redisService }] : []),
       ] : undefined);
     }
     return { record: current, inspection, compatibility: "current" as const };
@@ -1541,6 +1674,33 @@ export function createDockerEnvironmentBackend(
     if (database?.state === "running") await client.stopContainer(database.id, { timeoutSeconds: 10 });
   };
 
+  const stopComposeSidecarsAfterFailedStart = async (environment: EnvironmentIdentity, resolved: ResolvedDevContainerConfiguration): Promise<unknown[]> => {
+    const errors: unknown[] = [];
+    try {
+      const redis = await verifyComposeRedis(environment, resolved);
+      if (redis?.state === "running") await client.stopContainer(redis.id, { timeoutSeconds: 10 });
+    } catch (error) {
+      errors.push(error);
+    }
+    try {
+      await stopComposeDatabaseAfterFailedStart(environment, resolved);
+    } catch (error) {
+      errors.push(error);
+    }
+    return errors;
+  };
+
+  const combineWithSidecarCleanup = async (
+    environment: EnvironmentIdentity,
+    resolved: ResolvedDevContainerConfiguration,
+    cause: unknown,
+  ): Promise<unknown> => {
+    const cleanupErrors = await stopComposeSidecarsAfterFailedStart(environment, resolved);
+    return cleanupErrors.length === 0
+      ? cause
+      : new AggregateError([cause, ...cleanupErrors], "Dev Container startup failed and one or more managed sidecars could not be stopped", { cause });
+  };
+
   return {
     id: backendId,
     async inspect(identity) {
@@ -1607,22 +1767,33 @@ export function createDockerEnvironmentBackend(
         throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Docker container disappeared or changed identity before start");
       }
       const resolved = await resolveDevContainerConfiguration(environment, config, containerStorageRoot);
-      let database: DockerContainerInspection | null = null;
-      if (resolved.compose?.databaseService) {
-        database = await verifyComposeDatabase(environment, resolved);
-        if (!database) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose PostgreSQL sidecar is missing before worker start");
-        if (database.state !== "running") await client.startContainer(database.id);
-        if (!client.waitContainerHealthy) {
-          throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client cannot verify PostgreSQL readiness");
+      try {
+        if (resolved.compose?.databaseService) {
+          const database = await verifyComposeDatabase(environment, resolved);
+          if (!database) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose PostgreSQL sidecar is missing before worker start");
+          if (database.state !== "running") await client.startContainer(database.id);
+          if (!client.waitContainerHealthy) {
+            throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client cannot verify PostgreSQL readiness");
+          }
+          await client.waitContainerHealthy(database.id, 60_000);
         }
-        await client.waitContainerHealthy(database.id, 60_000);
+        if (resolved.compose?.redisService) {
+          const redis = await verifyComposeRedis(environment, resolved);
+          if (!redis) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose Redis sidecar is missing before worker start");
+          if (redis.state !== "running") await client.startContainer(redis.id);
+          if (!client.waitContainerHealthy) {
+            throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client cannot verify Redis readiness");
+          }
+          await client.waitContainerHealthy(redis.id, 60_000);
+        }
+      } catch (cause) {
+        throw await combineWithSidecarCleanup(environment, resolved, cause);
       }
       if (current.record.status !== "ready") {
         try {
           await client.startContainer(current.inspection.id);
         } catch (cause) {
-          await stopComposeDatabaseAfterFailedStart(environment, resolved);
-          throw cause;
+          throw await combineWithSidecarCleanup(environment, resolved, cause);
         }
       }
       const started = await inspectVerified(environment);
@@ -1634,12 +1805,12 @@ export function createDockerEnvironmentBackend(
         try {
           result = await runLifecycleCommand(environment, started.inspection, postCreateArgv(resolved.postCreateCommand, started.record.resourceId));
         } catch (cause) {
-          await stopComposeDatabaseAfterFailedStart(environment, resolved);
-          return failLifecycleCommand(started.record, started.inspection, "postCreateCommand", cause);
+          const failure = await combineWithSidecarCleanup(environment, resolved, cause);
+          return failLifecycleCommand(started.record, started.inspection, "postCreateCommand", failure);
         }
         if (result.exitCode !== 0 || result.cancelled) {
-          await stopComposeDatabaseAfterFailedStart(environment, resolved);
-          return failLifecycleCommand(started.record, started.inspection, "postCreateCommand", result);
+          const failure = await combineWithSidecarCleanup(environment, resolved, result);
+          return failLifecycleCommand(started.record, started.inspection, "postCreateCommand", failure);
         }
       }
       if (current.record.status !== "ready" && resolved.postStartCommand) {
@@ -1647,12 +1818,12 @@ export function createDockerEnvironmentBackend(
         try {
           result = await runLifecycleCommand(environment, started.inspection, lifecycleArgv(resolved.postStartCommand));
         } catch (cause) {
-          await stopComposeDatabaseAfterFailedStart(environment, resolved);
-          return failLifecycleCommand(started.record, started.inspection, "postStartCommand", cause);
+          const failure = await combineWithSidecarCleanup(environment, resolved, cause);
+          return failLifecycleCommand(started.record, started.inspection, "postStartCommand", failure);
         }
         if (result.exitCode !== 0 || result.cancelled) {
-          await stopComposeDatabaseAfterFailedStart(environment, resolved);
-          return failLifecycleCommand(started.record, started.inspection, "postStartCommand", result);
+          const failure = await combineWithSidecarCleanup(environment, resolved, result);
+          return failLifecycleCommand(started.record, started.inspection, "postStartCommand", failure);
         }
       }
       return started.record;
@@ -1668,6 +1839,11 @@ export function createDockerEnvironmentBackend(
         const database = await verifyComposeDatabase(environment, resolved);
         if (!database) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose PostgreSQL sidecar disappeared before stop");
         if (database.state !== "exited") await client.stopContainer(database.id, { timeoutSeconds: 10 });
+      }
+      if (resolved.compose?.redisService) {
+        const redis = await verifyComposeRedis(environment, resolved);
+        if (!redis) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose Redis sidecar disappeared before stop");
+        if (redis.state !== "exited") await client.stopContainer(redis.id, { timeoutSeconds: 10 });
       }
       const stopped = await inspectLifecycle(environment);
       if (!stopped || stopped.record.resourceId !== environment.resourceId || stopped.record.status !== "stopped") {
@@ -1689,6 +1865,7 @@ export function createDockerEnvironmentBackend(
       }
       const resolved = await resolveDevContainerConfiguration(environment, config, containerStorageRoot);
       let database: DockerContainerInspection | null = null;
+      let redis: DockerContainerInspection | null = null;
       if (resolved.compose?.databaseService) {
         database = await verifyComposeDatabase(environment, resolved);
         if (!database) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose PostgreSQL sidecar disappeared before removal");
@@ -1698,8 +1875,18 @@ export function createDockerEnvironmentBackend(
           if (!database || database.state !== "exited") throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "PostgreSQL sidecar could not be verified stopped before removal");
         }
       }
+      if (resolved.compose?.redisService) {
+        redis = await verifyComposeRedis(environment, resolved);
+        if (!redis) throw new DockerEnvironmentError("DOCKER_CONFIGURATION_MISMATCH", "Compose Redis sidecar disappeared before removal");
+        if (redis.state !== "exited") {
+          await client.stopContainer(redis.id, { timeoutSeconds: 10 });
+          redis = await verifyComposeRedis(environment, resolved);
+          if (!redis || redis.state !== "exited") throw new DockerEnvironmentError("DOCKER_IDENTITY_MISMATCH", "Redis sidecar could not be verified stopped before removal");
+        }
+      }
       await client.removeContainer(current.inspection.id, { force: false, removeVolumes: false });
       if (database) await client.removeContainer(database.id, { force: false, removeVolumes: false });
+      if (redis) await client.removeContainer(redis.id, { force: false, removeVolumes: false });
       if (resolved.compose) {
         if (!client.removeNetwork) throw new DockerEnvironmentError("DEV_CONTAINER_CONFIGURATION_UNSUPPORTED", "Docker client cannot remove managed Compose networks");
         await client.removeNetwork(resolved.compose.networkName);

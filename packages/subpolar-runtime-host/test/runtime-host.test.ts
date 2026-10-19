@@ -62,6 +62,11 @@ describe("SubpolarRuntimeHost", () => {
     expect(relativeStorage.createSession().capabilities.supports).toMatchObject({ "session.resume": false, "session.persistence": false });
   });
 
+  test("rejects restoration when the selected executor has no persistent session storage", () => {
+    const host = hostWith(() => "ok");
+    expect(() => host.restoreSession("persisted-session")).toThrow("cannot resume sessions");
+  });
+
   test("cancels the active Pi turn and releases the session for the next turn", async () => {
     let started!: () => void;
     const didStart = new Promise<void>((resolve) => { started = resolve; });

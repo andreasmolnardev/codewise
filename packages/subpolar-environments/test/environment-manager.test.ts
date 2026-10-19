@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import {
@@ -341,6 +341,48 @@ describe("environment lifecycle coordinator", () => {
     expect(commands[0]?.command[2]).toContain("host:'127.0.0.1'");
     expect(commands[0]?.command.at(-1)).toBe("5173");
     expect(commands[0]?.cwd).toBe(".");
+  });
+
+  test("keeps the same forwarded port isolated between worktree environments", async () => {
+    const { request, root } = await fixture();
+    const secondWorktree = path.join(root, "workspaces", "repo", "worktree-b");
+    await mkdir(secondWorktree, { recursive: true });
+    const secondRequest = {
+      ...request,
+      workspaceId: "workspace-2",
+      worktreePath: secondWorktree,
+    };
+    const backend = new FakeBackend();
+    const sessions: Array<{ environment: ManagedEnvironment; command: readonly string[] }> = [];
+    const sessionBackend = {
+      id: backend.id,
+      inspect: backend.inspect.bind(backend), create: backend.create.bind(backend),
+      start: backend.start.bind(backend), stop: backend.stop.bind(backend), remove: backend.remove.bind(backend),
+      startManagedSession: async (environment: ManagedEnvironment, command: readonly string[]): Promise<EnvironmentManagedProcessSession> => {
+        sessions.push({ environment, command });
+        return {
+          async write() {},
+          output: { async *[Symbol.asyncIterator]() {} },
+          result: Promise.resolve({ exitCode: 0, cancelled: false }),
+          async terminate() {},
+        };
+      },
+    };
+    const manager = createEnvironmentManager(sessionBackend);
+
+    const first = await manager.startPortTunnel(request, 5173);
+    const second = await manager.startPortTunnel(secondRequest, 5173);
+
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]?.environment.worktreePath).toBe(await realpath(request.worktreePath));
+    expect(sessions[1]?.environment.worktreePath).toBe(await realpath(secondWorktree));
+    expect(sessions[0]?.environment.id).not.toBe(sessions[1]?.environment.id);
+    expect(sessions.map(({ command }) => command.at(-1))).toEqual(["5173", "5173"]);
+    await expect(manager.terminateManagedSession(request, second.sessionId))
+      .rejects.toMatchObject({ code: "OWNERSHIP_MISMATCH" });
+    await manager.terminateManagedSession(secondRequest, second.sessionId);
+    await manager.terminateManagedSession(request, first.sessionId);
   });
 
   test("rejects lexical and symlink escapes from the configured storage root", async () => {

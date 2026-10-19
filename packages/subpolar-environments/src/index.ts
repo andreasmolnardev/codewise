@@ -24,6 +24,8 @@ export interface ManagedEnvironment extends EnvironmentIdentity {
   readonly backendId: string;
   readonly resourceId: string;
   readonly status: EnvironmentStatus;
+  /** Container ports declared for a future manager-owned forwarding route. */
+  readonly forwardedPorts?: readonly number[];
 }
 
 export interface EnvironmentLifecycleInspection {
@@ -883,6 +885,18 @@ export function createEnvironmentManager(
         const current = await inspect(currentIdentity);
         if (!current) {
           throw new EnvironmentManagerError("ENVIRONMENT_NOT_FOUND", "Registered environment container is missing");
+        }
+        // A pending ID is only written before create() returns. In that one
+        // crash window the backend may safely adopt the resource after its
+        // full identity/configuration inspection. Once a resource ID has been
+        // recorded, a different Docker object at the same stable name is not
+        // the registered resource and must not silently replace its binding.
+        const creationWasInterruptedBeforeResourceIdWasSaved = environment.resourceId === `pending:${environment.id}`;
+        if (!creationWasInterruptedBeforeResourceIdWasSaved && current.resourceId !== environment.resourceId) {
+          throw new EnvironmentManagerError(
+            "OWNERSHIP_MISMATCH",
+            "Registered environment resource no longer matches the verified backend resource",
+          );
         }
         return { environmentId: environment.id, environment: await persist(current) };
       } catch (error) {
